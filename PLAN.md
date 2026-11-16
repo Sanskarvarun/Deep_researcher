@@ -67,13 +67,13 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Metadata filtering (date, source, tags, tenant_id)
 - [x] Top-k with score thresholds
 
-### 1.4 Generation Layer
-- [ ] Prompt templates (system, user, few-shot)
-- [ ] Streaming responses via Gemini (`langchain-google-genai`)
-- [ ] Citations: inline `[doc_id]` with clickable chunks
-- [ ] Response formatting: markdown, structured output
-- [ ] Token counting & cost estimation
-- [ ] Provider fallback chain: Gemini → OpenRouter → Groq
+### 1.4 Generation Layer ✅
+- [x] Prompt templates (system, user, few-shot)
+- [x] Streaming responses via Gemini (`langchain-google-genai`)
+- [x] Citations: inline `[doc_id]` with clickable chunks
+- [x] Response formatting: markdown, structured output
+- [x] Token counting & cost estimation
+- [x] Provider fallback chain: Gemini → OpenRouter → Groq
 
 ### 1.5 First Working End-to-End Test
 - [ ] Ingest 3-5 sample documents

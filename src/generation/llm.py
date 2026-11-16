@@ -8,6 +8,7 @@ Supports:
 Fallback chain configured via LLM_PRIMARY / LLM_FALLBACKS env vars.
 """
 
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -56,6 +57,14 @@ class LLMFactory:
         self._clients[cache_key] = client
         log.info("llm_client_created", provider=provider, model=overrides.get("model"))
         return client
+
+    def stream(self, provider: str | None = None, **overrides: Any) -> BaseChatModel:
+        """Get a chat model for the given provider, configured for streaming.
+
+        Returns the same cached client as :meth:`get_model`; streaming is
+        performed by calling ``.stream()`` / ``.astream()`` on the client.
+        """
+        return self.get_model(provider, **overrides)
 
     def _build(self, provider: str, **overrides: Any) -> BaseChatModel:
         """Build a chat model for a specific provider."""
@@ -165,6 +174,74 @@ def invoke_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> 
             log.warning("llm_invoke_failed", provider=provider, error=str(e))
 
     raise GenerationError(f"All LLM providers failed: {errors}")
+
+
+def stream_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> Iterator[Any]:
+    """Stream LLM response chunks with automatic provider fallback.
+
+    Yields chunks from the first provider that successfully begins streaming.
+    If a provider fails before yielding any chunk, the next fallback is tried.
+
+    Args:
+        factory: LLMFactory instance.
+        messages: List of LangChain messages (or dicts convertible to them).
+        **kwargs: Passed to model.stream().
+
+    Yields:
+        Streamed response chunks.
+
+    Raises:
+        GenerationError: If all providers fail to stream.
+    """
+    from langchain_core.messages import convert_to_messages
+
+    lc_messages = convert_to_messages(messages)
+    chain = factory.get_fallback_chain()
+    errors: list[str] = []
+
+    for provider in chain:
+        try:
+            log.info("llm_stream_attempt", provider=provider)
+            model = factory.stream(provider)
+            yield from model.stream(lc_messages, **kwargs)
+            log.info("llm_stream_success", provider=provider)
+            return
+        except Exception as e:
+            # Drain any partially yielded chunk from the generator above.
+            error_msg = f"{provider}: {e}"
+            errors.append(error_msg)
+            log.warning("llm_stream_failed", provider=provider, error=str(e))
+
+    raise GenerationError(f"All LLM providers failed to stream: {errors}")
+
+
+async def astream_with_fallback(
+    factory: LLMFactory, messages: list, **kwargs: Any
+) -> AsyncIterator[Any]:
+    """Async-stream LLM response chunks with automatic provider fallback.
+
+    Mirrors :func:`stream_with_fallback` but uses ``model.astream()``.
+    """
+    from langchain_core.messages import convert_to_messages
+
+    lc_messages = convert_to_messages(messages)
+    chain = factory.get_fallback_chain()
+    errors: list[str] = []
+
+    for provider in chain:
+        try:
+            log.info("llm_astream_attempt", provider=provider)
+            model = factory.stream(provider)
+            async for chunk in model.astream(lc_messages, **kwargs):
+                yield chunk
+            log.info("llm_astream_success", provider=provider)
+            return
+        except Exception as e:
+            error_msg = f"{provider}: {e}"
+            errors.append(error_msg)
+            log.warning("llm_astream_failed", provider=provider, error=str(e))
+
+    raise GenerationError(f"All LLM providers failed to stream: {errors}")
 
 
 # Module-level singleton
