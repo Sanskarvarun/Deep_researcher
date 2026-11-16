@@ -63,50 +63,69 @@ class VectorStore:
         """
         exists = self.client.collection_exists(self.collection)
 
-        if exists and not recreate:
-            log.info("collection_exists", collection=self.collection)
-            return
-
         if exists and recreate:
             log.warning("recreating_collection", collection=self.collection)
             self.client.delete_collection(self.collection)
+            exists = False
 
-        self.client.create_collection(
-            collection_name=self.collection,
-            vectors_config={
-                # Named vector "dense" — matches the upsert key
-                "dense": qmodels.VectorParams(
-                    size=dim,
-                    distance=qmodels.Distance.COSINE,
-                    on_disk=True,
-                )
-            },
-            sparse_vectors_config={
-                "bm25": qmodels.SparseVectorParams(index=qmodels.SparseIndexParams(on_disk=True))
-            },
-            quantization_config=qmodels.ScalarQuantization(
-                scalar=qmodels.ScalarQuantizationConfig(
-                    type=qmodels.ScalarType.INT8,
-                    quantile=0.99,
-                    always_ram=True,
-                )
-            ),
-        )
+        if not exists:
+            self.client.create_collection(
+                collection_name=self.collection,
+                vectors_config={
+                    # Named vector "dense" — matches the upsert key
+                    "dense": qmodels.VectorParams(
+                        size=dim,
+                        distance=qmodels.Distance.COSINE,
+                        on_disk=True,
+                    )
+                },
+                sparse_vectors_config={
+                    "bm25": qmodels.SparseVectorParams(
+                        index=qmodels.SparseIndexParams(on_disk=True)
+                    )
+                },
+                quantization_config=qmodels.ScalarQuantization(
+                    scalar=qmodels.ScalarQuantizationConfig(
+                        type=qmodels.ScalarType.INT8,
+                        quantile=0.99,
+                        always_ram=True,
+                    )
+                ),
+            )
+            log.info("collection_created", collection=self.collection, dim=dim)
 
-        # Payload indexes for fast filtering
-        for field in ("tenant_id", "document_id", "source", "created_at", "source_type", "tags"):
+        # Payload indexes for fast filtering.
+        # Qdrant requires an index before filtering on a payload field,
+        # so we ensure all fields used by dedup and retrieval are indexed.
+        # Indexes that already exist are skipped gracefully.
+        for field in (
+            "tenant_id",
+            "document_id",
+            "document_hash",
+            "content_hash",
+            "source",
+            "created_at",
+            "source_type",
+            "tags",
+        ):
             schema = (
                 qmodels.PayloadSchemaType.DATETIME
                 if field == "created_at"
                 else qmodels.PayloadSchemaType.KEYWORD
             )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name=field,
-                field_schema=schema,
-            )
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field,
+                    field_schema=schema,
+                )
+            except Exception as e:
+                if "already exist" in str(e).lower() or "already exists" in str(e).lower():
+                    log.debug("payload_index_exists", field=field)
+                else:
+                    raise
 
-        log.info("collection_created", collection=self.collection, dim=dim)
+        log.info("collection_ready", collection=self.collection, dim=dim, exists=exists)
 
     def health_check(self) -> bool:
         """Check Qdrant connectivity."""
