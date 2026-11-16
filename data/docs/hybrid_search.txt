@@ -1,0 +1,22 @@
+# Hybrid Search: Dense + Sparse
+
+Dense vector search captures semantic meaning but can miss exact keyword
+matches. Sparse (BM25) search captures keyword overlap but misses semantics.
+Hybrid search combines both to get the best of both worlds.
+
+## Reciprocal Rank Fusion (RRF)
+
+RRF is a simple, effective way to fuse ranked lists from multiple retrievers.
+For each document, its RRF score is:
+
+    score = sum(weight / (k + rank))
+
+where `k` is a constant (typically 60) and `rank` is the document's position in
+each list. Documents ranked highly by both dense and sparse retrievers rise to
+the top.
+
+## When to Use Hybrid
+
+Use hybrid search when your queries contain specific entities, product names,
+or technical terms that may not appear in dense embedding space but should
+still match via keyword overlap.

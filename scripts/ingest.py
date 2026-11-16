@@ -193,6 +193,60 @@ def _print_result(result: IngestionResult) -> None:
         console.print(f"  [red]error:[/red]     {result.error}")
 
 
+@app.command()
+def query(
+    query_text: str = typer.Argument(..., help="Natural-language query"),
+    tenant_id: str = typer.Option(None, "--tenant-id", "-t", help="Tenant identifier"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="Max number of results"),
+    search_type: str = typer.Option("hybrid", "--search-type", help="dense, sparse, or hybrid"),
+) -> None:
+    """Query the vector store and print results with citations."""
+    from src.core import setup_logging
+    from src.retrieval import MetadataFilter, Retriever
+
+    setup_logging()
+    retriever = Retriever()
+
+    f = MetadataFilter(tenant_id=tenant_id) if tenant_id else None
+    results = retriever.search(
+        query_text,
+        search_type=search_type,
+        top_k=top_k,
+        filter=f,
+    )
+
+    if not results:
+        console.print("\n[yellow]No results found.[/yellow]\n")
+        return
+
+    console.print(
+        f"\n[bold blue]Query:[/bold blue] {query_text}"
+        f"\n[bold]Search type:[/bold] {search_type}  [bold]Results:[/bold] {len(results)}\n"
+    )
+
+    table = Table(title="Retrieval Results")
+    table.add_column("#", justify="right", style="dim", width=3)
+    table.add_column("Score", justify="right", style="dim", width=7)
+    table.add_column("Citation", style="cyan", width=14)
+    table.add_column("Content", style="white")
+    table.add_column("Source", style="dim")
+
+    for i, r in enumerate(results, start=1):
+        key = str(r.document_id or r.id)[:12]
+        content = r.content[:120].replace("\n", " ")
+        source = r.source or "(unknown)"
+        table.add_row(
+            str(i),
+            f"{r.score:.3f}",
+            f"[{key}]",
+            content,
+            source,
+        )
+
+    console.print(table)
+    console.print()
+
+
 def _color(status: DocumentStatus) -> str:
     return "green" if status.value == "completed" else "red"
 

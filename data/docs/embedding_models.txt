@@ -1,0 +1,14 @@
+# Embedding Models
+
+Embedding models convert text into dense vectors where semantically similar
+texts are close together in vector space. Common choices include:
+
+- **BAAI/bge-large-en-v1.5**: Strong open-source English embeddings (1024 dims)
+- **sentence-transformers/all-MiniLM-L6-v2**: Fast, lightweight (384 dims)
+- **gemini-embedding-001**: Google's embedding API with flexible output dims
+
+## Choosing Dimensions
+
+Higher-dimensional embeddings capture more nuance but use more memory and are
+slower to search. For most RAG applications, 768–1024 dimensions is a good
+balance of quality and efficiency.

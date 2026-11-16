@@ -1,0 +1,23 @@
+# Introduction to RAG
+
+Retrieval-Augmented Generation (RAG) combines information retrieval with text
+generation to ground large language models in external knowledge. Instead of
+relying solely on parametric memory (what the model learned during training),
+a RAG system searches a knowledge base for relevant documents and feeds them
+to the model as context.
+
+## How RAG Works
+
+A typical RAG pipeline has four stages:
+
+1. **Load**: Extract text from source documents (PDFs, Markdown, HTML, etc.)
+2. **Chunk**: Split documents into smaller, embeddable pieces
+3. **Embed**: Convert each chunk into a dense vector using an embedding model
+4. **Retrieve + Generate**: At query time, embed the question, find the most
+   similar chunks, and have the LLM answer using those chunks as context
+
+## Why RAG Matters
+
+RAG reduces hallucination by anchoring answers in retrieved evidence. It also
+makes it possible to update the knowledge base without retraining the model —
+simply add, remove, or edit documents and re-index them.

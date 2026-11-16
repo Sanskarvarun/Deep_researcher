@@ -75,10 +75,10 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Token counting & cost estimation
 - [x] Provider fallback chain: Gemini → OpenRouter → Groq
 
-### 1.5 First Working End-to-End Test
-- [ ] Ingest 3-5 sample documents
-- [ ] Query via CLI/script
-- [ ] Verify citations trace back to sources
+### 1.5 First Working End-to-End Test ✅
+- [x] Ingest 3-5 sample documents
+- [x] Query via CLI/script
+- [x] Verify citations trace back to sources
 
 ---
 
