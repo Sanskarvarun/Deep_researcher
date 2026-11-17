@@ -202,18 +202,23 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Human-in-the-loop (interrupt-based)
   - `src/agent/nodes.py` — `human_review_node` with `interrupt()`, `route_after_human_review`
 
-### 3.2 Tools ✅
+### 3.2 Tools (MVP/Placeholder Implementations) ⚠️
 - [x] `RetrieveTool`, `RerankTool`, `GenerateTool`, `ReflectTool`, `CalculatorTool`
   - `src/agent/tools.py` — All tools implemented as LangChain BaseTool subclasses
   - Lazy initialization to avoid Qdrant lock conflicts at import time
-- [x] `SummarizeTool`
-  - `src/agent/tools.py` — Extractive summarization with configurable length/focus
-- [x] `WebSearchTool`
-  - `src/agent/tools.py` — Placeholder for SerpAPI/Brave/Google CSE integration
-- [x] `CodeExecutionTool`
-  - `src/agent/tools.py` — Sandboxed Python execution with timeout, AST validation
-- [x] Dynamic tool selection by query type
-  - `src/agent/tools.py` — `select_tools_for_query()` with keyword-based heuristic
+- [x] `SummarizeTool` (MVP)
+  - `src/agent/tools.py` — **Extractive summarization only** (truncation), not LLM-based
+  - Comment notes "In production, this would use an LLM"
+- [x] `WebSearchTool` (Placeholder)
+  - `src/agent/tools.py` — **Returns mock data**, not real search
+  - Comment notes "Placeholder. Configure a real search API for production."
+  - Needs SerpAPI/Brave/Google CSE integration for production
+- [x] `CodeExecutionTool` (MVP)
+  - `src/agent/tools.py` — Sandboxed Python execution with AST validation
+  - Uses temp files + subprocess, basic timeout handling
+- [x] Dynamic tool selection by query type (MVP)
+  - `src/agent/tools.py` — `select_tools_for_query()` with **keyword-based heuristic**
+  - Not LLM-driven; uses simple keyword matching
 
 ### 3.3 Agentic Patterns
 - [x] Query decomposition (via `plan_node` creating execution plan)
@@ -231,7 +236,7 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 ---
 
-*Plan Version 3.2 | Last Updated: 2026-11-17*
+*Plan Version 3.3 | Last Updated: 2026-11-17*
 
 *Plan Version 3.1 | Last Updated: 2026-11-17*
 
