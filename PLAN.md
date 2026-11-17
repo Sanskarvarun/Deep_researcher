@@ -221,12 +221,18 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
   - `src/agent/tools.py` — `select_tools_for_query_llm()` uses LLM for intelligent selection
   - Keyword-based fallback `select_tools_for_query()` also available
 
-### 3.3 Agentic Patterns
+### 3.3 Agentic Patterns ✅
 - [x] Query decomposition (via `plan_node` creating execution plan)
+  - `src/agent/nodes.py` — `_decompose_question()` uses LLM to split complex queries into atomic sub-questions
+  - `_synthesize_plan()` builds execution plan from sub-questions
 - [x] Iterative retrieval (via `reflect` node feeding back to `rerank`/`generate`)
 - [x] Self-correction (via `reflect` tool identifying issues)
-- [ ] Planning before acting (partial - basic plan created, not yet LLM-driven)
-- [ ] Multi-hop reasoning
+  - `src/agent/tools.py` — `ReflectTool` checks citations, relevance, uncertainty
+- [x] Planning before acting (LLM-driven)
+  - `src/agent/nodes.py` — `plan_node` uses `_decompose_question()` + `_synthesize_plan()` for LLM-driven plan synthesis
+- [x] Multi-hop reasoning
+  - `src/agent/nodes.py` — `multi_hop_node` with hop counter, `max_hops` (default 3), accumulated docs, follow-up sub-questions from reflection suggestions
+  - Reflection suggestions trigger new sub-questions and extended plan
 
 ### 3.4 Memory ✅
 - [x] Short-term conversation memory (Redis)
@@ -239,9 +245,7 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 ---
 
-*Plan Version 3.4 | Last Updated: 2026-11-17*
-
-*Plan Version 3.1 | Last Updated: 2026-11-17*
+*Plan Version 3.4 | Last Updated: 2026-11-18*
 
 ## Phase 4: Advanced RAG Techniques (Week 7-8)
 
