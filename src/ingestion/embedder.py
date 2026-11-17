@@ -19,7 +19,15 @@ from tenacity import (
     wait_random,
 )
 
-from src.core import cache_get, cache_set, get_logger, make_cache_key, metrics, trace_embed
+from src.core import (
+    breakers,
+    cache_get,
+    cache_set,
+    get_logger,
+    make_cache_key,
+    metrics,
+    trace_embed,
+)
 from src.core.exceptions import EmbeddingError
 from src.ingestion.models import EmbeddedChunk
 
@@ -123,7 +131,7 @@ class HuggingFaceEmbedder:
             ):
                 for i in range(0, len(uncached_texts), BATCH_SIZE):
                     batch = uncached_texts[i : i + BATCH_SIZE]
-                    batch_results = self._embed_batch(batch)
+                    batch_results = breakers.call("embed:huggingface", self._embed_batch, batch)
                     for j, emb in enumerate(batch_results):
                         idx = uncached_indices[i + j]
                         results[idx] = emb
@@ -168,8 +176,12 @@ class LocalEmbedder:
                 uncached_indices.append(i)
         if uncached_texts:
             with trace_embed(provider="local", model=self.model_name, count=len(uncached_texts)):
-                vectors = self._model.encode(
-                    uncached_texts, show_progress_bar=False, convert_to_numpy=False
+                vectors = breakers.call(
+                    "embed:local",
+                    self._model.encode,
+                    uncached_texts,
+                    show_progress_bar=False,
+                    convert_to_numpy=False,
                 )
             for j, v in enumerate(vectors):
                 emb = v.tolist()
@@ -225,7 +237,9 @@ class GeminiEmbedder:
 
         if uncached_texts:
             with trace_embed(provider="gemini", model=self.model_name, count=len(uncached_texts)):
-                result = self._client.models.embed_content(
+                result = breakers.call(
+                    "embed:gemini",
+                    self._client.models.embed_content,
                     model=self.model_name,
                     contents=list(uncached_texts),  # type: ignore[arg-type]
                     config=types.EmbedContentConfig(output_dimensionality=self.dim),

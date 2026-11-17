@@ -181,34 +181,22 @@ class RAGGenerator:
                 provider_used = provider or "custom"
                 model_used = getattr(chat_model, "model_name", "custom")
             else:
-                provider = provider or settings.llm_primary
-                model_name = model or (
-                    settings.google_model if provider == "gemini" else settings.openrouter_model
+                model_override = model if isinstance(model, str) else None
+                outcome: dict[str, Any] = {}
+                response = invoke_with_fallback(
+                    self.factory,
+                    convert_to_messages(messages),
+                    provider=provider,
+                    model=model_override,
+                    temperature=temperature,
+                    outcome=outcome,
                 )
-                temperature = settings.google_temperature if temperature is None else temperature
-                chat_model = self.factory.get_model(
-                    provider, model=model_name, temperature=temperature
+                provider_used = str(outcome.get("provider") or provider or settings.llm_primary)
+                model_used = str(
+                    outcome.get("model")
+                    or model_override
+                    or self.factory.default_model(provider_used)
                 )
-                try:
-                    log.info("llm_generate_attempt", provider=provider, model=model_name)
-                    response = chat_model.invoke(convert_to_messages(messages))
-                    log.info("llm_generate_success", provider=provider)
-                    provider_used = provider
-                    model_used = model_name
-                except Exception as e:
-                    metrics.increment("generate.errors", labels={"provider": provider})
-                    log.warning("llm_generate_failed_primary", provider=provider, error=str(e))
-                    # Fall back to the multi-provider chain (settings defaults).
-                    response = invoke_with_fallback(
-                        self.factory,
-                        convert_to_messages(messages),
-                    )
-                    provider_used = getattr(response, "response_metadata", {}).get(
-                        "provider", provider
-                    )
-                    model_used = getattr(response, "response_metadata", {}).get(
-                        "model_name", model_name
-                    )
 
             otel_trace.get_current_span().set_attributes({
                 "provider": provider_used,

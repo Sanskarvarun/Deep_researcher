@@ -130,12 +130,27 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
   - 18 cache tests in `tests/test_cache.py` (TTL expiry, LRU eviction, key stability, factory fallback; Redis tests auto-skip when no server)
   - `tests/conftest.py` isolates the process-wide cache per test so cached results can't leak across temporary collections
 
-### 2.4 Security & Reliability
-- [ ] Secrets from env only (gitleaks pre-commit)
-- [ ] Rate limiting (per user/IP/endpoint)
-- [ ] Pydantic input validation
-- [ ] Circuit breakers, retry w/ backoff + jitter
-- [ ] Graceful degradation (70B → 8B fallback)
+### 2.4 Security & Reliability ✅
+- [x] Secrets from env only (gitleaks pre-commit)
+  - All credentials come from `Settings` (env / `.env`); `gitleaks` + `detect-private-key` run on every commit
+  - `src/core/security.py` — `redact()`, `mask_secret()`, `redact_mapping()` for log-safe payloads; `SECRET_FIELDS` lists every credential so none can be logged by accident
+  - `validate_security_config()` refuses to start in production with `DEBUG=true`, wildcard `CORS_ORIGINS`, an empty `API_KEY` when `REQUIRE_AUTH=true`, or a placeholder key
+- [x] Rate limiting (per user/IP/endpoint)
+  - `src/api/rate_limit.py` — fixed-window counters, `InMemoryRateLimiter` (local, no Docker) + `RedisRateLimiter` (shared across workers); `create_rate_limiter()` falls back to memory when Redis is unreachable — same code path in both environments
+  - Identity = SHA-256 hash of a **valid** API key (`key:<16 hex>`) else client IP; `X-Forwarded-For` honored only from `TRUSTED_PROXIES`, so rotating fake keys can't bypass the limit
+  - Per method + path bucket; `429` with `Retry-After`, `X-RateLimit-Limit/Remaining/Reset`; `/health`, `/metrics`, `/docs` exempt
+- [x] Pydantic input validation, HTTP surface
+  - `src/api/schemas.py` — `AskRequest` / `IngestRequest` with length, range, enum, tenant-pattern, control-character, and extra-field rejection; ingestion paths go through `resolve_safe_path()` (traversal, null bytes, extension allowlist, size cap, optional `INGEST_ROOT` jail)
+  - `src/api/app.py`, `routes.py`, `middleware.py`, `auth.py`, `responses.py` — FastAPI app factory, `POST /api/v1/ask`, `POST /api/v1/ingest`, `GET /health`
+  - Every response carries `X-Request-ID` (validated inbound or generated) and security headers; body-size limit returns `413`; errors use one `{"error": {code, message, details, request_id}}` envelope that never echoes raw input
+  - API key auth via `X-API-Key` or `Authorization: Bearer`, constant-time comparison, identities hashed before they touch logs/metrics/Redis
+- [x] Circuit breakers, retry w/ backoff + jitter
+  - `src/core/resilience.py` — thread-safe `CircuitBreaker` (closed/open/half-open, injectable clock, abandoned-probe recovery) + `CircuitBreakerRegistry`; `retry_policy()` = exponential backoff with jitter, transient failures only; `call_with_resilience()` retries **inside** the breaker so one outage counts as one failure
+  - Wired into LLM calls (`llm:<provider>`), embeddings (`embed:huggingface|local|gemini`), and Qdrant (`qdrant`)
+- [x] Graceful degradation (70B → 8B fallback)
+  - `invoke_with_fallback()` tries every full-size model first, then each provider's smaller model (`*_DEGRADED_MODEL`), skipping providers whose breaker is open; streaming and async streaming follow the same plan
+  - `outcome` dict reports the winning provider/model and whether the degraded tier was used; `generate.degraded` / `generate.circuit_rejected` metrics track how often it happens
+- Tests: `tests/test_resilience.py`, `test_security.py`, `test_rate_limit.py`, `test_api.py`
 
 ### 2.5 Data Pipeline Robustness
 - [ ] Idempotent ingestion (content hash dedup)
@@ -317,8 +332,8 @@ uv run mypy src/
 
 ## Next Step
 
-**Phase 2.4**: Security & Reliability — secrets from env only (gitleaks pre-commit); rate limiting (per user/IP/endpoint); Pydantic input validation; circuit breakers, retry w/ backoff + jitter; graceful degradation (70B → 8B fallback).
+**Phase 2.5**: Data Pipeline Robustness - idempotent ingestion (content hash dedup); incremental updates; dead letter handling for failed docs; Celery background jobs + WebSocket progress.
 
 ---
 
-*Plan Version 2.3 | Last Updated: 2026-11-17*
+*Plan Version 2.4 | Last Updated: 2026-11-17*

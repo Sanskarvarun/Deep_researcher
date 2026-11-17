@@ -24,7 +24,15 @@ from uuid import UUID
 
 from qdrant_client.http import models as qmodels
 
-from src.core import cache_get, cache_set, get_logger, make_cache_key, metrics, trace_retrieve
+from src.core import (
+    breakers,
+    cache_get,
+    cache_set,
+    get_logger,
+    make_cache_key,
+    metrics,
+    trace_retrieve,
+)
 from src.core.config import settings
 from src.core.exceptions import RetrievalError
 from src.ingestion.vectorstore import VectorStore, sparse_vector_for_text
@@ -254,7 +262,9 @@ class Retriever:
     ) -> list[SearchResult]:
         try:
             embedding = self.embedder.embed_texts([query])[0]
-            response = self._vectorstore.client.query_points(
+            response = breakers.call(
+                "qdrant",
+                self._vectorstore.client.query_points,
                 collection_name=self._vectorstore.collection,
                 query=embedding,
                 using="dense",
@@ -280,7 +290,9 @@ class Retriever:
         if sparse is None:
             return []
         try:
-            response = self._vectorstore.client.query_points(
+            response = breakers.call(
+                "qdrant",
+                self._vectorstore.client.query_points,
                 collection_name=self._vectorstore.collection,
                 query=qmodels.SparseVector(indices=sparse.indices, values=sparse.values),
                 using="bm25",

@@ -123,6 +123,26 @@ class ExternalServiceError(DeepResearcherError):
         )
 
 
+class CircuitOpenError(ExternalServiceError):
+    """Raised when a call is rejected because the circuit breaker is open."""
+
+    def __init__(
+        self,
+        service: str,
+        retry_after: float | None = None,
+        details: dict[str, Any] | None = None,
+    ):
+        merged = {**(details or {}), "circuit": "open"}
+        if retry_after is not None:
+            merged["retry_after"] = round(retry_after, 3)
+        super().__init__(
+            service,
+            "circuit breaker is open; request rejected",
+            merged,
+            status_code=503,
+        )
+
+
 class EmbeddingError(ExternalServiceError):
     """Raised when embedding generation fails."""
 

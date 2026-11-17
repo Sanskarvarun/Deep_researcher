@@ -1,1 +1,1 @@
-"""API module - FastAPI routes, middleware."""
+"""API module - FastAPI app, routes, schemas, auth, middleware."""

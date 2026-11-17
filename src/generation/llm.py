@@ -12,16 +12,16 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import convert_to_messages
 from pydantic import SecretStr
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-    wait_random,
-)
 
-from src.core import GenerationError, metrics
+from src.core import (
+    CircuitOpenError,
+    GenerationError,
+    breakers,
+    call_with_resilience,
+    metrics,
+)
 from src.core.config import settings
 from src.core.logging import get_logger
 
@@ -127,58 +127,163 @@ class LLMFactory:
         """Return ordered provider list: primary first, then fallbacks."""
         return [settings.llm_primary, *settings.llm_fallbacks]
 
+    def default_model(self, provider: str) -> str:
+        """Configured (full-size) model for a provider."""
+        return {
+            "gemini": settings.google_model,
+            "openrouter": settings.openrouter_model,
+            "groq": settings.groq_model,
+        }.get(provider, "")
 
-# Retry decorator for transient LLM errors
-_llm_retry = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10) + wait_random(0, 1),
-    retry=retry_if_exception_type(GenerationError),
-    reraise=True,
-)
+    def degraded_model(self, provider: str) -> str:
+        """Smaller fallback model for a provider (graceful degradation)."""
+        return {
+            "gemini": settings.google_degraded_model,
+            "openrouter": settings.openrouter_degraded_model,
+            "groq": settings.groq_degraded_model,
+        }.get(provider, "")
 
 
-@retry(
-    stop=stop_after_attempt(len(settings.llm_fallbacks) + 1),
-    wait=wait_exponential(multiplier=1, min=1, max=10) + wait_random(0, 1),
-    reraise=True,
-)
-def invoke_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> Any:
-    """Invoke LLM with automatic provider fallback.
+def _attempt_plan(
+    factory: LLMFactory, provider: str | None = None
+) -> list[tuple[str, str | None, bool]]:
+    """Build the ordered attempt list as ``(provider, model_override, degraded)``.
 
-    Tries primary provider, then each fallback in order.
+    Full-size models are tried across every provider first; only then are the
+    smaller degraded models tried (e.g. Llama 70B -> 8B, Gemini flash ->
+    flash-lite). This preserves answer quality while still degrading
+    gracefully when an entire model tier is unavailable.
+    """
+    chain = factory.get_fallback_chain()
+    if provider:
+        chain = [provider, *[p for p in chain if p != provider]]
+
+    plan: list[tuple[str, str | None, bool]] = [(p, None, False) for p in chain]
+    if settings.degraded_model_enabled:
+        for p in chain:
+            degraded = factory.degraded_model(p)
+            if degraded and degraded != factory.default_model(p):
+                plan.append((p, degraded, True))
+    return plan
+
+
+def _invoke_once(
+    factory: LLMFactory,
+    provider: str,
+    messages: list,
+    *,
+    model: str | None,
+    temperature: float | None,
+    kwargs: dict[str, Any],
+) -> Any:
+    """Invoke one provider, protected by retry + circuit breaker."""
+    overrides: dict[str, Any] = {}
+    if model:
+        overrides["model"] = model
+    if temperature is not None:
+        overrides["temperature"] = temperature
+
+    service = f"llm:{provider}"
+
+    def _call() -> Any:
+        chat_model = factory.get_model(provider, **overrides)
+        return chat_model.invoke(messages, **kwargs)
+
+    return call_with_resilience(service, _call)
+
+
+def invoke_with_fallback(
+    factory: LLMFactory,
+    messages: list,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    outcome: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Invoke the LLM with retries, breaker protection, and graceful fallback.
+
+    Tries the requested provider first (default: ``LLM_PRIMARY``), then the
+    remaining providers, then smaller degraded models. Providers whose circuit
+    breaker is open are skipped instead of being called again.
 
     Args:
         factory: LLMFactory instance.
         messages: List of LangChain messages.
-        **kwargs: Passed to model.invoke().
+        provider: Preferred provider; defaults to the configured primary.
+        model: Optional model override for the first attempt.
+        temperature: Optional temperature override.
+        outcome: Optional dict populated with the winning provider/model and
+            whether the degraded tier was used.
+        **kwargs: Passed to ``model.invoke()``.
 
     Returns:
         Model response.
 
     Raises:
-        GenerationError: If all providers fail.
+        GenerationError: If every provider and degraded model fails.
     """
-    chain = factory.get_fallback_chain()
     errors: list[str] = []
+    plan = _attempt_plan(factory, provider)
+    if model and plan:
+        # Caller-supplied model replaces the first attempt's model but is not a
+        # degraded tier (it was explicitly requested at full quality).
+        plan[0] = (plan[0][0], model, False)
 
-    for provider in chain:
+    for attempt_provider, attempt_model, degraded in plan:
+        service = f"llm:{attempt_provider}"
         try:
-            log.info("llm_invoke_attempt", provider=provider)
-            model = factory.get_model(provider)
-            response = model.invoke(messages, **kwargs)
-            log.info("llm_invoke_success", provider=provider)
+            log.info(
+                "llm_invoke_attempt",
+                provider=attempt_provider,
+                model=attempt_model or "default",
+                degraded=degraded,
+            )
+            response = _invoke_once(
+                factory,
+                attempt_provider,
+                messages,
+                model=attempt_model,
+                temperature=temperature,
+                kwargs=kwargs,
+            )
+            log.info("llm_invoke_success", provider=attempt_provider, degraded=degraded)
+            if outcome is not None:
+                outcome.update(
+                    provider=attempt_provider,
+                    model=attempt_model or factory.default_model(attempt_provider),
+                    degraded=degraded,
+                )
+            if degraded:
+                metrics.increment("generate.degraded", labels={"provider": attempt_provider})
             return response
+        except CircuitOpenError as e:
+            errors.append(f"{service}: {e.message}")
+            metrics.increment("generate.circuit_rejected", labels={"provider": attempt_provider})
+            log.warning("llm_circuit_open", provider=attempt_provider)
         except Exception as e:
-            error_msg = f"{provider}: {e}"
-            errors.append(error_msg)
-            log.warning("llm_invoke_failed", provider=provider, error=str(e))
+            errors.append(f"{attempt_provider}: {e}")
+            log.warning(
+                "llm_invoke_failed",
+                provider=attempt_provider,
+                model=attempt_model or "default",
+                error=str(e),
+            )
 
     metrics.increment("generate.errors", labels={"provider": "all_failed"})
+    log.error("llm_all_providers_failed", attempts=len(plan))
     raise GenerationError(f"All LLM providers failed: {errors}")
 
 
-def stream_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> Iterator[Any]:
-    """Stream LLM response chunks with automatic provider fallback.
+def stream_with_fallback(
+    factory: LLMFactory,
+    messages: list,
+    *,
+    provider: str | None = None,
+    **kwargs: Any,
+) -> Iterator[Any]:
+    """Stream LLM response chunks with retries and provider fallback.
 
     Yields chunks from the first provider that successfully begins streaming.
     If a provider fails before yielding any chunk, the next fallback is tried.
@@ -186,6 +291,7 @@ def stream_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> 
     Args:
         factory: LLMFactory instance.
         messages: List of LangChain messages (or dicts convertible to them).
+        provider: Preferred provider; defaults to the configured primary.
         **kwargs: Passed to model.stream().
 
     Yields:
@@ -194,53 +300,82 @@ def stream_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> 
     Raises:
         GenerationError: If all providers fail to stream.
     """
-    from langchain_core.messages import convert_to_messages
-
     lc_messages = convert_to_messages(messages)
-    chain = factory.get_fallback_chain()
     errors: list[str] = []
 
-    for provider in chain:
+    for attempt_provider, attempt_model, degraded in _attempt_plan(factory, provider):
+        breaker = breakers.get(f"llm:{attempt_provider}")
         try:
-            log.info("llm_stream_attempt", provider=provider)
-            model = factory.stream(provider)
-            yield from model.stream(lc_messages, **kwargs)
-            log.info("llm_stream_success", provider=provider)
-            return
+            breaker.before_call()
+        except CircuitOpenError as e:
+            errors.append(f"llm:{attempt_provider}: {e.message}")
+            log.warning("llm_circuit_open", provider=attempt_provider)
+            continue
+
+        try:
+            log.info(
+                "llm_stream_attempt",
+                provider=attempt_provider,
+                model=attempt_model or "default",
+                degraded=degraded,
+            )
+            overrides = {"model": attempt_model} if attempt_model else {}
+            model_obj = factory.stream(attempt_provider, **overrides)
+            yield from model_obj.stream(lc_messages, **kwargs)
         except Exception as e:
-            # Drain any partially yielded chunk from the generator above.
-            error_msg = f"{provider}: {e}"
-            errors.append(error_msg)
-            log.warning("llm_stream_failed", provider=provider, error=str(e))
+            breaker.record_failure()
+            errors.append(f"{attempt_provider}: {e}")
+            log.warning("llm_stream_failed", provider=attempt_provider, error=str(e))
+            continue
+        breaker.record_success()
+        log.info("llm_stream_success", provider=attempt_provider, degraded=degraded)
+        return
 
     raise GenerationError(f"All LLM providers failed to stream: {errors}")
 
 
 async def astream_with_fallback(
-    factory: LLMFactory, messages: list, **kwargs: Any
+    factory: LLMFactory,
+    messages: list,
+    *,
+    provider: str | None = None,
+    **kwargs: Any,
 ) -> AsyncIterator[Any]:
-    """Async-stream LLM response chunks with automatic provider fallback.
+    """Async-stream LLM chunks with retries and provider fallback.
 
     Mirrors :func:`stream_with_fallback` but uses ``model.astream()``.
     """
-    from langchain_core.messages import convert_to_messages
-
     lc_messages = convert_to_messages(messages)
-    chain = factory.get_fallback_chain()
     errors: list[str] = []
 
-    for provider in chain:
+    for attempt_provider, attempt_model, degraded in _attempt_plan(factory, provider):
+        breaker = breakers.get(f"llm:{attempt_provider}")
         try:
-            log.info("llm_astream_attempt", provider=provider)
-            model = factory.stream(provider)
-            async for chunk in model.astream(lc_messages, **kwargs):
+            breaker.before_call()
+        except CircuitOpenError as e:
+            errors.append(f"llm:{attempt_provider}: {e.message}")
+            log.warning("llm_circuit_open", provider=attempt_provider)
+            continue
+
+        try:
+            log.info(
+                "llm_astream_attempt",
+                provider=attempt_provider,
+                model=attempt_model or "default",
+                degraded=degraded,
+            )
+            overrides = {"model": attempt_model} if attempt_model else {}
+            model_obj = factory.stream(attempt_provider, **overrides)
+            async for chunk in model_obj.astream(lc_messages, **kwargs):
                 yield chunk
-            log.info("llm_astream_success", provider=provider)
-            return
         except Exception as e:
-            error_msg = f"{provider}: {e}"
-            errors.append(error_msg)
-            log.warning("llm_astream_failed", provider=provider, error=str(e))
+            breaker.record_failure()
+            errors.append(f"{attempt_provider}: {e}")
+            log.warning("llm_astream_failed", provider=attempt_provider, error=str(e))
+            continue
+        breaker.record_success()
+        log.info("llm_astream_success", provider=attempt_provider, degraded=degraded)
+        return
 
     raise GenerationError(f"All LLM providers failed to stream: {errors}")
 

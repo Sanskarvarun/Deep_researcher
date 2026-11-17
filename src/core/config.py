@@ -108,8 +108,39 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000, alias="API_PORT")
     api_workers: int = Field(default=1, alias="API_WORKERS")
     cors_origins: list[str] = Field(default=["*"], alias="CORS_ORIGINS")
-    rate_limit_requests: int = Field(default=100, alias="RATE_LIMIT_REQUESTS")
-    rate_limit_window: int = Field(default=60, alias="RATE_LIMIT_WINDOW")
+    rate_limit_requests: int = Field(default=100, ge=1, alias="RATE_LIMIT_REQUESTS")
+    rate_limit_window: int = Field(default=60, ge=1, alias="RATE_LIMIT_WINDOW")
+    enable_rate_limit: bool = Field(default=True, alias="ENABLE_RATE_LIMIT")
+
+    # API security
+    # When REQUIRE_AUTH=true, requests must send the API key via
+    # `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+    api_key: str = Field(default="", alias="API_KEY")
+    require_auth: bool = Field(default=True, alias="REQUIRE_AUTH")
+    max_request_bytes: int = Field(default=1_048_576, ge=1024, alias="MAX_REQUEST_BYTES")
+    trusted_proxies: list[str] = Field(default=[], alias="TRUSTED_PROXIES")
+    # Optional root that API ingestion paths must stay inside. Empty = no root
+    # restriction (still rejects traversal and unsupported extensions).
+    ingest_root: str = Field(default="", alias="INGEST_ROOT")
+
+    # Resilience (external services)
+    retry_max_attempts: int = Field(default=3, ge=1, le=10, alias="RETRY_MAX_ATTEMPTS")
+    retry_base_delay: float = Field(default=0.5, ge=0.0, alias="RETRY_BASE_DELAY")
+    retry_max_delay: float = Field(default=8.0, ge=0.0, alias="RETRY_MAX_DELAY")
+    circuit_failure_threshold: int = Field(default=5, ge=1, alias="CIRCUIT_FAILURE_THRESHOLD")
+    circuit_recovery_timeout: float = Field(default=30.0, ge=0.0, alias="CIRCUIT_RECOVERY_TIMEOUT")
+    circuit_half_open_max_calls: int = Field(default=1, ge=1, alias="CIRCUIT_HALF_OPEN_MAX_CALLS")
+
+    # Graceful degradation (large model -> small model on the same provider)
+    degraded_model_enabled: bool = Field(default=True, alias="DEGRADED_MODEL_ENABLED")
+    google_degraded_model: str = Field(
+        default="gemini-2.0-flash-lite", alias="GOOGLE_DEGRADED_MODEL"
+    )
+    openrouter_degraded_model: str = Field(
+        default="meta-llama/llama-3.1-8b-instruct:free",
+        alias="OPENROUTER_DEGRADED_MODEL",
+    )
+    groq_degraded_model: str = Field(default="llama-3.1-8b-instant", alias="GROQ_DEGRADED_MODEL")
 
     # Document Processing
     max_file_size_mb: int = Field(default=50, alias="MAX_FILE_SIZE_MB")

@@ -20,6 +20,7 @@ from src.core.exceptions import (
     AuthorizationError,
     CacheError,
     ChunkingError,
+    CircuitOpenError,
     ConfigurationError,
     DeepResearcherError,
     DocumentProcessingError,
@@ -36,6 +37,15 @@ from src.core.exceptions import (
 )
 from src.core.logging import get_logger, setup_logging
 from src.core.metrics import MetricsRegistry, metrics, track_latency
+from src.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerRegistry,
+    CircuitState,
+    breakers,
+    call_with_resilience,
+    is_transient_error,
+    retry_policy,
+)
 from src.core.tracing import (
     current_span_context,
     get_tracer,
@@ -57,6 +67,10 @@ __all__ = [
     "CacheConfig",
     "CacheError",
     "ChunkingError",
+    "CircuitBreaker",
+    "CircuitBreakerRegistry",
+    "CircuitOpenError",
+    "CircuitState",
     "ConfigurationError",
     # Exceptions
     "DeepResearcherError",
@@ -77,9 +91,11 @@ __all__ = [
     # Config
     "Settings",
     "ValidationError",
+    "breakers",
     "cache_delete",
     "cache_get",
     "cache_set",
+    "call_with_resilience",
     "close_cache",
     "create_cache",
     # Tracing / Observability
@@ -88,8 +104,10 @@ __all__ = [
     "get_logger",
     "get_settings",
     "get_tracer",
+    "is_transient_error",
     "make_cache_key",
     "metrics",
+    "retry_policy",
     "settings",
     # Logging
     "setup_logging",
