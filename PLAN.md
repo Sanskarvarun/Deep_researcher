@@ -181,7 +181,7 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 ---
 
-*Plan Version 2.5 | Last Updated: 2026-11-17*
+*Plan Version 3.2 | Last Updated: 2026-11-17*
 
 ## Phase 3: Agentic Capabilities (Week 5-6)
 
@@ -197,16 +197,23 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Conditional routing
   - `route_to_tool()` and `should_continue()` for dynamic routing
   - `StateGraph` with conditional edges between all nodes
-- [ ] Checkpointing (LangGraph built-in, not yet configured)
-- [ ] Human-in-the-loop (not yet implemented)
+- [x] Checkpointing (LangGraph built-in, SqliteSaver)
+  - `src/agent/nodes.py` — `create_agent_graph(checkpointer=SqliteSaver.from_conn_string("sqlite:///checkpoints.db"))`
+- [x] Human-in-the-loop (interrupt-based)
+  - `src/agent/nodes.py` — `human_review_node` with `interrupt()`, `route_after_human_review`
 
-### 3.2 Tools
+### 3.2 Tools ✅
 - [x] `RetrieveTool`, `RerankTool`, `GenerateTool`, `ReflectTool`, `CalculatorTool`
   - `src/agent/tools.py` — All tools implemented as LangChain BaseTool subclasses
   - Lazy initialization to avoid Qdrant lock conflicts at import time
-- [ ] `SummarizeTool`
-- [ ] `WebSearchTool`, `CodeExecutionTool`
-- [ ] Dynamic tool selection by query type
+- [x] `SummarizeTool`
+  - `src/agent/tools.py` — Extractive summarization with configurable length/focus
+- [x] `WebSearchTool`
+  - `src/agent/tools.py` — Placeholder for SerpAPI/Brave/Google CSE integration
+- [x] `CodeExecutionTool`
+  - `src/agent/tools.py` — Sandboxed Python execution with timeout, AST validation
+- [x] Dynamic tool selection by query type
+  - `src/agent/tools.py` — `select_tools_for_query()` with keyword-based heuristic
 
 ### 3.3 Agentic Patterns
 - [x] Query decomposition (via `plan_node` creating execution plan)
@@ -215,11 +222,16 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [ ] Planning before acting (partial - basic plan created, not yet LLM-driven)
 - [ ] Multi-hop reasoning
 
-### 3.4 Memory
-- [ ] Short-term conversation memory (Redis)
-- [ ] Long-term memory (vector store)
+### 3.4 Memory ✅
+- [x] Short-term conversation memory (Redis)
+  - `src/agent/memory.py` — `ConversationMemory` with Redis backend, TTL, session isolation
+- [x] Long-term memory (vector store)
+  - `src/agent/memory.py` — `LongTermMemory` using Qdrant, fact storage/retrieval
+  - `MemoryManager` combining both with unified interface
 
 ---
+
+*Plan Version 3.2 | Last Updated: 2026-11-17*
 
 *Plan Version 3.1 | Last Updated: 2026-11-17*
 

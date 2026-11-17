@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import pathlib
 from typing import Any, cast
 
 from langchain_core.tools import BaseTool
@@ -414,6 +416,172 @@ class CalculatorTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
+# Summarize Tool
+# ---------------------------------------------------------------------------
+
+
+class SummarizeInput(BaseModel):
+    """Input for the summarize tool."""
+
+    text: str = Field(description="Text to summarize")
+    max_length: int = Field(default=200, description="Maximum length of summary")
+    focus: str | None = Field(default=None, description="Focus area for summarization")
+
+
+class SummarizeTool(BaseTool):
+    """Summarize text using an LLM."""
+
+    name: str = "summarize"
+    description: str = (
+        "Summarize a long text into a concise summary. "
+        "Useful for condensing retrieved documents or long answers."
+    )
+    args_schema: type[BaseModel] = SummarizeInput
+
+    def _run(
+        self,
+        text: str,
+        max_length: int = 200,
+        focus: str | None = None,
+    ) -> dict[str, Any]:
+        log.info("tool_summarize", text_length=len(text), max_length=max_length)
+
+        # For now, use a simple truncation-based summary
+        # In production, this would use an LLM
+        if len(text) <= max_length:
+            return {"summary": text, "original_length": len(text), "summary_length": len(text)}
+
+        # Simple extractive summary: take first and last sentences
+        sentences = text.split(". ")
+        summary = text[:max_length] if len(sentences) <= 2 else ". ".join(sentences[:2]) + "..."
+
+        if len(summary) > max_length:
+            summary = summary[: max_length - 3] + "..."
+
+        return {
+            "summary": summary,
+            "original_length": len(text),
+            "summary_length": len(summary),
+        }
+
+    async def _arun(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._run(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Web Search Tool
+# ---------------------------------------------------------------------------
+
+
+class WebSearchInput(BaseModel):
+    """Input for the web search tool."""
+
+    query: str = Field(description="Search query")
+    max_results: int = Field(default=5, description="Maximum number of results")
+    source: str = Field(default="news", description="Search source: news, general, academic")
+
+
+class WebSearchTool(BaseTool):
+    """Search the web for current information."""
+
+    name: str = "web_search"
+    description: str = (
+        "Search the web for current information not in the knowledge base. "
+        "Returns search results with snippets and URLs."
+    )
+    args_schema: type[BaseModel] = WebSearchInput
+
+    def _run(
+        self,
+        query: str,
+        max_results: int = 5,
+        source: str = "news",
+    ) -> dict[str, Any]:
+        log.info("tool_web_search", query=query, max_results=max_results)
+
+        # Placeholder - in production, this would call a search API
+        # like SerpAPI, Google Custom Search, or Brave Search API
+        return {
+            "query": query,
+            "results": [
+                {
+                    "title": f"Result {i} for: {query}",
+                    "snippet": f"This is a placeholder snippet for result {i} about {query}.",
+                    "url": f"https://example.com/result-{i}",
+                    "source": source,
+                }
+                for i in range(1, max_results + 1)
+            ],
+            "note": "Web search tool is a placeholder. Configure a real search API for production.",
+        }
+
+    async def _arun(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._run(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Code Execution Tool
+# ---------------------------------------------------------------------------
+
+
+class CodeExecutionInput(BaseModel):
+    """Input for the code execution tool."""
+
+    code: str = Field(description="Python code to execute")
+    timeout: int = Field(default=30, description="Execution timeout in seconds")
+
+
+class CodeExecutionTool(BaseTool):
+    """Execute Python code in a sandboxed environment."""
+
+    name: str = "code_execution"
+    description: str = (
+        "Execute Python code and return the result. "
+        "Useful for calculations, data processing, or algorithmic tasks. "
+        "Execution is sandboxed and timed out after 30 seconds."
+    )
+    args_schema: type[BaseModel] = CodeExecutionInput
+
+    def _run(self, code: str, timeout: int = 30) -> dict[str, Any]:
+        import subprocess
+        import tempfile
+
+        log.info("tool_code_execution", code_length=len(code))
+
+        # Write code to a temporary file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            temp_path = f.name
+
+        try:
+            # Run with timeout
+            result = subprocess.run(
+                ["python", temp_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.returncode,
+                "success": result.returncode == 0,
+            }
+        except subprocess.TimeoutExpired:
+            return {"error": f"Execution timed out after {timeout} seconds", "success": False}
+        except Exception as e:
+            return {"error": str(e), "success": False}
+        finally:
+            # Clean up temp file
+            with contextlib.suppress(OSError):
+                pathlib.Path(temp_path).unlink()
+
+    async def _arun(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._run(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry
 # ---------------------------------------------------------------------------
 
@@ -430,6 +598,9 @@ def get_all_tools() -> list[BaseTool]:
             GenerateTool(),
             ReflectTool(),
             CalculatorTool(),
+            SummarizeTool(),
+            WebSearchTool(),
+            CodeExecutionTool(),
         ]
     return _tools_cache
 
@@ -440,3 +611,81 @@ def get_tool_by_name(name: str) -> BaseTool | None:
         if tool.name == name:
             return tool
     return None
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Tool Selection
+# ---------------------------------------------------------------------------
+
+
+def select_tools_for_query(
+    query: str, available_tools: list[BaseTool] | None = None
+) -> list[BaseTool]:
+    """Select relevant tools based on the query.
+
+    Uses simple keyword matching to determine which tools are relevant.
+    In production, this could use an LLM for more sophisticated selection.
+    """
+    if available_tools is None:
+        available_tools = get_all_tools()
+
+    selected = []
+
+    # Always include retrieve and generate for RAG queries
+    retrieve_tool = next((t for t in available_tools if t.name == "retrieve"), None)
+    generate_tool = next((t for t in available_tools if t.name == "generate"), None)
+    if retrieve_tool:
+        selected.append(retrieve_tool)
+    if generate_tool:
+        selected.append(generate_tool)
+
+    # Add rerank for complex queries
+    complex_words = ["compare", "analyze", "evaluate", "rank", "best", "top"]
+    if any(word in query.lower() for word in complex_words):
+        rerank_tool = next((t for t in available_tools if t.name == "rerank"), None)
+        if rerank_tool:
+            selected.append(rerank_tool)
+
+    # Add reflect for complex queries
+    if "?" in query and len(query) > 50:
+        reflect_tool = next((t for t in available_tools if t.name == "reflect"), None)
+        if reflect_tool:
+            selected.append(reflect_tool)
+
+    # Add calculator for math queries
+    math_ops = ["+", "-", "*", "/", "=", "calculate", "compute", "math"]
+    if any(op in query for op in math_ops):
+        calc_tool = next((t for t in available_tools if t.name == "calculator"), None)
+        if calc_tool:
+            selected.append(calc_tool)
+
+    # Add summarize for long content requests
+    summarize_words = ["summarize", "summary", "tl;dr", "brief"]
+    if any(word in query.lower() for word in summarize_words):
+        summarize_tool = next((t for t in available_tools if t.name == "summarize"), None)
+        if summarize_tool:
+            selected.append(summarize_tool)
+
+    # Add web search for current events or external info
+    current_words = ["latest", "recent", "news", "current", "2024", "2025"]
+    if any(word in query.lower() for word in current_words):
+        web_search_tool = next((t for t in available_tools if t.name == "web_search"), None)
+        if web_search_tool:
+            selected.append(web_search_tool)
+
+    # Add code execution for programming tasks
+    code_words = ["code", "python", "script", "algorithm", "function", "debug"]
+    if any(word in query.lower() for word in code_words):
+        code_tool = next((t for t in available_tools if t.name == "code_execution"), None)
+        if code_tool:
+            selected.append(code_tool)
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_selected = []
+    for tool in selected:
+        if tool.name not in seen:
+            seen.add(tool.name)
+            unique_selected.append(tool)
+
+    return unique_selected

@@ -6,6 +6,7 @@ from typing import Any
 
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
+from langgraph.types import interrupt
 
 from src.agent.state import AgentState, PlanStep, create_initial_state
 from src.agent.tools import (
@@ -307,13 +308,80 @@ def route_to_tool(state: AgentState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Human Review Node (for Human-in-the-Loop)
+# ---------------------------------------------------------------------------
+
+
+def human_review_node(state: AgentState) -> dict[str, Any]:
+    """Human review node - pauses execution for human approval.
+
+    This node interrupts the graph execution and waits for human input.
+    The human can approve, reject, or modify the generated answer.
+    """
+    log.info("node_human_review")
+
+    # The interrupt will pause execution and wait for human input
+    # The human can provide feedback via the interrupt value
+
+    # Present the current answer for review
+    review_data = {
+        "question": state["question"],
+        "answer": state.get("final_answer"),
+        "citations": state.get("citations", []),
+        "plan": state.get("plan", []),
+    }
+
+    # Interrupt and wait for human response
+    human_response = interrupt(review_data)
+
+    # Process human response
+    action = human_response.get("action", "approve")  # approve, reject, modify
+    feedback = human_response.get("feedback", "")
+    modified_answer = human_response.get("modified_answer")
+
+    if action == "approve":
+        log.info("human_review_approved")
+        return {"human_feedback": "approved", "final_answer": state["final_answer"]}
+    elif action == "modify" and modified_answer:
+        log.info("human_review_modified")
+        return {"final_answer": modified_answer, "human_feedback": feedback}
+    else:
+        log.info("human_review_rejected", feedback=feedback)
+        # Reject - send back to generate with feedback
+        return {
+            "human_feedback": f"rejected: {feedback}",
+            "tool_calls": [
+                {
+                    "name": "generate",
+                    "args": {"question": state["question"] + f"\n\nHuman feedback: {feedback}"},
+                }
+            ],
+        }
+
+
+def route_after_human_review(state: AgentState) -> str:
+    """Route after human review - either back to generate or end."""
+    feedback = str(state.get("human_feedback", ""))
+    if feedback == "approved":
+        return END
+    elif feedback.startswith("rejected"):
+        return "generate"
+    return END
+
+
+# ---------------------------------------------------------------------------
 # Graph Builder
 # ---------------------------------------------------------------------------
 
 
-def create_agent_graph() -> Any:
-    """Create the LangGraph agent graph."""
+def create_agent_graph(checkpointer: Any = None) -> Any:
+    """Create the LangGraph agent graph with optional checkpointing."""
+    from langgraph.checkpoint.sqlite import SqliteSaver  # type: ignore[import-not-found]
     from langgraph.graph import StateGraph
+
+    # Use SqliteSaver for checkpointing if not provided
+    if checkpointer is None:
+        checkpointer = SqliteSaver.from_conn_string("sqlite:///checkpoints.db")
 
     workflow = StateGraph(AgentState)
 
@@ -324,6 +392,7 @@ def create_agent_graph() -> Any:
     workflow.add_node("generate", generate_node)
     workflow.add_node("reflect", reflect_node)
     workflow.add_node("tool_use", tool_use_node)
+    workflow.add_node("human_review", human_review_node)
 
     # Set entry point
     workflow.set_entry_point("plan")
@@ -372,6 +441,7 @@ def create_agent_graph() -> Any:
         {
             "reflect": "reflect",
             "tool_use": "tool_use",
+            "human_review": "human_review",
             END: END,
         },
     )
@@ -400,7 +470,17 @@ def create_agent_graph() -> Any:
         },
     )
 
-    return workflow.compile()
+    # Human review node goes to end or back to generate
+    workflow.add_conditional_edges(
+        "human_review",
+        route_after_human_review,
+        {
+            "generate": "generate",
+            END: END,
+        },
+    )
+
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # ---------------------------------------------------------------------------
