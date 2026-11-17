@@ -19,7 +19,7 @@ from tenacity import (
     wait_random,
 )
 
-from src.core import get_logger
+from src.core import cache_get, cache_set, get_logger, make_cache_key, metrics, trace_embed
 from src.core.exceptions import EmbeddingError
 from src.ingestion.models import EmbeddedChunk
 
@@ -98,17 +98,40 @@ class HuggingFaceEmbedder:
         return pooled
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts in batches of BATCH_SIZE."""
+        """Embed texts in batches of BATCH_SIZE with per-text caching."""
         if not texts:
             return []
 
-        results: list[list[float]] = []
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i : i + BATCH_SIZE]
-            results.extend(self._embed_batch(batch))
-            log.debug("embed_batch_done", model=self.model_name, batch_size=len(batch))
+        results: list[list[float] | None] = []
+        uncached_texts: list[str] = []
+        uncached_indices: list[int] = []
 
-        return results
+        # Check cache for each text
+        for i, text in enumerate(texts):
+            cache_key = make_cache_key("emb", self.model_name, text)
+            cached = cache_get(cache_key)
+            if cached is not None:
+                results.append(cached)  # type: ignore[arg-type]
+            else:
+                results.append(None)  # placeholder
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+
+        if uncached_texts:
+            with trace_embed(
+                provider="huggingface", model=self.model_name, count=len(uncached_texts)
+            ):
+                for i in range(0, len(uncached_texts), BATCH_SIZE):
+                    batch = uncached_texts[i : i + BATCH_SIZE]
+                    batch_results = self._embed_batch(batch)
+                    for j, emb in enumerate(batch_results):
+                        idx = uncached_indices[i + j]
+                        results[idx] = emb
+                        cache_key = make_cache_key("emb", self.model_name, uncached_texts[i + j])
+                        cache_set(cache_key, emb)
+                    log.debug("embed_batch_done", model=self.model_name, batch_size=len(batch))
+
+        return [r for r in results if r is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +154,30 @@ class LocalEmbedder:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        vectors = self._model.encode(texts, show_progress_bar=False, convert_to_numpy=False)
-        return [v.tolist() for v in vectors]
+        results: list[list[float] | None] = []
+        uncached_texts: list[str] = []
+        uncached_indices: list[int] = []
+        for i, text in enumerate(texts):
+            cache_key = make_cache_key("emb", self.model_name, text)
+            cached = cache_get(cache_key)
+            if cached is not None:
+                results.append(cached)  # type: ignore[arg-type]
+            else:
+                results.append(None)  # placeholder
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+        if uncached_texts:
+            with trace_embed(provider="local", model=self.model_name, count=len(uncached_texts)):
+                vectors = self._model.encode(
+                    uncached_texts, show_progress_bar=False, convert_to_numpy=False
+                )
+            for j, v in enumerate(vectors):
+                emb = v.tolist()
+                idx = uncached_indices[j]
+                results[idx] = emb
+                cache_key = make_cache_key("emb", self.model_name, uncached_texts[j])
+                cache_set(cache_key, emb)
+        return [r for r in results if r is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -165,17 +210,36 @@ class GeminiEmbedder:
         if not texts:
             return []
 
-        result = self._client.models.embed_content(
-            model=self.model_name,
-            contents=list(texts),  # type: ignore[arg-type]
-            config=types.EmbedContentConfig(output_dimensionality=self.dim),
-        )
-        vectors: list[list[float]] = []
-        for embedding in result.embeddings or []:
-            values = getattr(embedding, "values", None)
-            if values:
-                vectors.append([float(v) for v in values])
-        return vectors
+        results: list[list[float] | None] = []
+        uncached_texts: list[str] = []
+        uncached_indices: list[int] = []
+        for i, text in enumerate(texts):
+            cache_key = make_cache_key("emb", self.model_name, text)
+            cached = cache_get(cache_key)
+            if cached is not None:
+                results.append(cached)  # type: ignore[arg-type]
+            else:
+                results.append(None)
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+
+        if uncached_texts:
+            with trace_embed(provider="gemini", model=self.model_name, count=len(uncached_texts)):
+                result = self._client.models.embed_content(
+                    model=self.model_name,
+                    contents=list(uncached_texts),  # type: ignore[arg-type]
+                    config=types.EmbedContentConfig(output_dimensionality=self.dim),
+                )
+            for j, embedding in enumerate(result.embeddings or []):
+                values = getattr(embedding, "values", None)
+                if values:
+                    emb = [float(v) for v in values]
+                    idx = uncached_indices[j]
+                    results[idx] = emb
+                    cache_key = make_cache_key("emb", self.model_name, uncached_texts[j])
+                    cache_set(cache_key, emb)
+
+        return [r for r in results if r is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +298,12 @@ def embed_chunks(
         return []
 
     texts = [c.content for c in chunks]
-    embeddings = embedder.embed_texts(texts)
+    with (
+        trace_embed(provider=embedder.model_name, model=embedder.model_name, count=len(chunks)),
+        metrics.timer("embed.latency", labels={"provider": embedder.model_name}),
+    ):
+        embeddings = embedder.embed_texts(texts)
+    metrics.increment("embed.requests", labels={"provider": embedder.model_name})
 
     embedded: list[EmbeddedChunk] = []
     for chunk, embedding in zip(chunks, embeddings, strict=False):

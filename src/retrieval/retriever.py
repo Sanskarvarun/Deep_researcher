@@ -24,7 +24,7 @@ from uuid import UUID
 
 from qdrant_client.http import models as qmodels
 
-from src.core import get_logger
+from src.core import cache_get, cache_set, get_logger, make_cache_key, metrics, trace_retrieve
 from src.core.config import settings
 from src.core.exceptions import RetrievalError
 from src.ingestion.vectorstore import VectorStore, sparse_vector_for_text
@@ -137,17 +137,54 @@ class Retriever:
         if not self._vectorstore.client.collection_exists(self._vectorstore.collection):
             self._vectorstore.ensure_collection(dim=self.embedder.dim)
 
-        if search_type == SearchType.DENSE:
-            return self._dense_search(query, top_k, score_threshold, qfilter)
-        if search_type == SearchType.SPARSE:
-            return self._sparse_search(query, top_k, score_threshold, qfilter)
-        return self._hybrid_search(
+        # Cache key based on corpus + query + all search parameters. The
+        # collection and embedding model must be part of the key: the same
+        # query against a different corpus/embedder is a different result set.
+        filter_key = str(filter) if filter else "none"
+        cache_key = make_cache_key(
+            "ret",
+            self._vectorstore.collection,
+            getattr(self.embedder, "model_name", type(self.embedder).__name__),
             query,
+            search_type.value,
             top_k,
-            qfilter,
-            dense_weight=dense_weight or settings.dense_weight,
-            sparse_weight=sparse_weight or settings.bm25_weight,
+            score_threshold,
+            filter_key,
+            dense_weight,
+            sparse_weight,
         )
+        cached = cache_get(cache_key)
+        if cached is not None:
+            log.debug("retrieve_cache_hit", query=query[:50])
+            metrics.increment("retrieve.cache_hits")
+            return cached  # type: ignore[no-any-return]
+
+        labels = {"search_type": search_type.value}
+        metrics.increment("retrieve.requests", labels=labels)
+        with (
+            trace_retrieve(
+                query=query[:120],
+                top_k=top_k,
+                search_type=search_type.value,
+            ),
+            metrics.timer("retrieve.latency", labels=labels),
+        ):
+            if search_type == SearchType.DENSE:
+                results = self._dense_search(query, top_k, score_threshold, qfilter)
+            elif search_type == SearchType.SPARSE:
+                results = self._sparse_search(query, top_k, score_threshold, qfilter)
+            else:
+                results = self._hybrid_search(
+                    query,
+                    top_k,
+                    qfilter,
+                    dense_weight=dense_weight or settings.dense_weight,
+                    sparse_weight=sparse_weight or settings.bm25_weight,
+                )
+
+        # Cache results (TTL 1 hour)
+        cache_set(cache_key, results, ttl=3600)
+        return results
 
     def dense_search(
         self,
@@ -228,6 +265,7 @@ class Retriever:
                 with_vectors=False,
             )
         except Exception as e:
+            metrics.increment("retrieve.errors", labels={"search_type": "dense"})
             raise RetrievalError(f"Dense search failed: {e}", details={"query": query[:80]}) from e
         return self._to_results(response.points)
 
@@ -253,6 +291,7 @@ class Retriever:
                 with_vectors=False,
             )
         except Exception as e:
+            metrics.increment("retrieve.errors", labels={"search_type": "sparse"})
             raise RetrievalError(f"Sparse search failed: {e}", details={"query": query[:80]}) from e
         return self._to_results(response.points)
 

@@ -23,7 +23,7 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 | **Reranking** | Local `bge-reranker-large` | Unlimited | Cohere API (1K/mo) |
 | **Document Parsing** | pypdf, markdown-it, bs4, YT API | Unlimited | Marker (local) |
 | **Orchestration** | LangGraph | Unlimited | — |
-| **Observability** | Phoenix (local) | Unlimited | LangSmith (5K/mo) |
+| **Observability** | LangSmith (OTLP, 5K/mo free) | Unlimited (Dev plan) | Phoenix local / console |
 | **Evaluation** | RAGAS + custom | Unlimited | — |
 | **API Framework** | FastAPI | Unlimited | — |
 | **Frontend** | Streamlit | Unlimited | — |
@@ -45,7 +45,7 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Project structure (`src/{core,ingestion,retrieval,generation,agent,evaluation,api,ui}`)
 - [x] `pyproject.toml` with ruff, mypy, pytest config
 - [x] `src/core/`: config (Pydantic Settings), logging (structlog), exceptions
-- [x] `.env.example`, `docker-compose.yml` (Qdrant, Redis, Phoenix)
+- [x] `.env.example`, `docker-compose.yml` (Qdrant, Redis)
 - [x] Pre-commit hooks (ruff, mypy, gitleaks)
 - [x] Documentation: PRD, TRD, AppFlow, UI/UX, Backend Schema, Plan
 
@@ -86,23 +86,49 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 **Goal**: Observable, evaluable, cached, secure.
 
-### 2.1 Observability
-- [ ] Structured JSON logs with trace_id / span_id propagation
-- [ ] Phoenix integration: spans for embed → retrieve → rerank → generate
-- [ ] Metrics: P50/P95/P99 latency, throughput, error rates
-- [ ] Correlation IDs across all services
+### 2.1 Observability ✅
+- [x] Structured JSON logs with trace_id / span_id propagation
+  - `src/core/logging.py` — structlog processor auto-injects OTel `trace_id` / `span_id` into every log record
+- [x] Phoenix integration: spans for embed → retrieve → rerank → generate
+  - `src/core/tracing.py` — OpenTelemetry tracer; **LangSmith OTLP primary** (`LANGSMITH_ENDPOINT/otel/v1/traces` with `x-api-key`); Phoenix at `PHOENIX_URL` as fallback; console if neither reachable
+  - Spans wired into `embedder.py`, `retriever.py`, `generation/chain.py`; `trace_rerank` helper ready for the rerank stage
+  - Phoenix removed from `docker-compose.yml` (no local service required)
+- [x] Metrics: P50/P95/P99 latency, throughput, error rates
+  - `src/core/metrics.py` — thread-safe in-memory registry (counters + latency histograms) with `track_latency` decorator
+- [x] Correlation IDs across all services
+  - Every log inside a span carries the same `trace_id`/`span_id` as the exported span
 
-### 2.2 Evaluation Framework
-- [ ] RAGAS: faithfulness, answer_relevancy, context_precision, context_recall
-- [ ] Custom: citation accuracy, hallucination rate
-- [ ] Golden dataset (50-200 QA pairs) in `data/eval/`
-- [ ] CI integration: run evals on change
-- [ ] `eval_runs` + `eval_results` tables (see [backendschema.md](backendschema.md))
+### 2.2 Evaluation Framework ✅
+- [x] RAGAS: faithfulness, answer_relevancy, context_precision, context_recall
+  - `src/evaluation/ragas_eval.py` — `RAGASEvaluator` using our LLM/embedding providers
+- [x] Custom: citation accuracy, hallucination rate
+  - `src/evaluation/custom_eval.py` — `CitationAccuracyEvaluator`, `HallucinationRateEvaluator` (LLM-as-judge)
+- [x] Golden dataset (50-200 QA pairs) in `data/eval/`
+  - `src/evaluation/golden_dataset.py` — `GoldenDataset`, `QAPair`, JSON persistence
+  - Sample dataset created at `data/eval/golden_set.json`
+- [x] CI integration: run evals on change
+  - `src/evaluation/runner.py` — `EvaluationRunner`, `EvalConfig`, `run_evaluation()`
+  - Produces `EvalRunResult` with aggregate + per-question metrics
+- [x] `eval_runs` + `eval_results` tables (see [backendschema.md](backendschema.md))
+  - Schema defined; ready for PostgreSQL + Alembic in Phase 5
 
-### 2.3 Caching & Performance
-- [ ] Redis: embeddings, retrieval results, LLM responses
-- [ ] TTL strategies, request dedup (in-flight coalescing)
-- [ ] Connection pooling, async throughout
+### 2.3 Caching & Performance ✅
+- [x] Redis: embeddings, retrieval results, LLM responses
+  - `src/core/cache.py` — backend-agnostic `CacheBackend` ABC + `InMemoryCache` (LRU + TTL, thread-safe) + `RedisCache` (JSON, namespaced `dr:` keys, fail-fast ping, prefix-scoped `clear()`)
+  - `create_cache()` auto-selects Redis when reachable and **falls back to in-memory** otherwise — same code locally (no Docker) and in production
+  - Embeddings: per-text cache `emb:*` in all three providers (`huggingface`, `local`, `gemini`)
+  - Retrieval: `ret:*` keyed on collection + embedding model + query + search type + top_k + score_threshold + filter + weights, TTL 1h
+  - LLM: `llm:*` keyed on full prompt + provider + model + temperature, TTL 24h (structured output intentionally bypasses the cache)
+- [x] TTL strategies, request dedup (in-flight coalescing)
+  - TTLs: embeddings use backend default, retrieval 3600s, LLM 86400s (`CACHE_TTL` configurable)
+  - `RAGGenerator.generate` coalesces concurrent identical requests with a leader/`Event` handshake (30s cap) instead of duplicate LLM calls; lock released in `finally`
+  - Stable keys via `make_cache_key()` (BLAKE2b) — Python's `hash()` is per-process randomized and would break a shared Redis cache
+  - Hit/miss metrics: `retrieve.cache_hits`, `generate.cache_hits`, `generate.coalesced_hits`; misses continue to be counted on the normal request metric
+- [x] Connection pooling, async throughout
+  - redis-py client pool reused through the module-level singleton (`get_cache()` / `close_cache()`), 1s connect/socket timeouts
+  - Async callers: cache ops are microsecond-scale and non-blocking for the in-memory backend; the async API path is unaffected (see `src/api`)
+  - 18 cache tests in `tests/test_cache.py` (TTL expiry, LRU eviction, key stability, factory fallback; Redis tests auto-skip when no server)
+  - `tests/conftest.py` isolates the process-wide cache per test so cached results can't leak across temporary collections
 
 ### 2.4 Security & Reliability
 - [ ] Secrets from env only (gitleaks pre-commit)
@@ -242,8 +268,8 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [ ] Context window management
 
 ### Production Engineering
-- [ ] Observability (logs, metrics, traces)
-- [ ] Evaluation-driven development
+- [x] Observability (logs, metrics, traces)
+- [x] Evaluation-driven development
 - [ ] Caching strategies
 - [ ] Circuit breakers & resilience
 - [ ] CI/CD for ML systems
@@ -291,8 +317,8 @@ uv run mypy src/
 
 ## Next Step
 
-**Phase 1.3**: Basic retrieval — dense search, BM25 sparse, hybrid RRF, metadata filters (retriever module).
+**Phase 2.4**: Security & Reliability — secrets from env only (gitleaks pre-commit); rate limiting (per user/IP/endpoint); Pydantic input validation; circuit breakers, retry w/ backoff + jitter; graceful degradation (70B → 8B fallback).
 
 ---
 
-*Plan Version 2.0 | Last Updated: 2026-10-11*
+*Plan Version 2.3 | Last Updated: 2026-11-17*

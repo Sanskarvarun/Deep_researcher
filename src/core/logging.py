@@ -9,6 +9,20 @@ import structlog
 from pythonjsonlogger import jsonlogger
 
 from src.core.config import settings
+from src.core.tracing import current_span_context
+
+
+def _trace_correlation_processor(
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Inject the current OpenTelemetry ``trace_id`` / ``span_id`` into the
+    event dict so logs are correlatable with traces across service
+    boundaries (embed -> retrieve -> rerank -> generate)."""
+    ctx = current_span_context()
+    if ctx:
+        event_dict.setdefault("trace_id", ctx["trace_id"])
+        event_dict.setdefault("span_id", ctx["span_id"])
+    return event_dict
 
 
 def setup_logging() -> None:
@@ -25,6 +39,7 @@ def setup_logging() -> None:
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
+            _trace_correlation_processor,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
             structlog.stdlib.PositionalArgumentsFormatter(),

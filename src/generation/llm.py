@@ -21,7 +21,7 @@ from tenacity import (
     wait_random,
 )
 
-from src.core import GenerationError
+from src.core import GenerationError, metrics
 from src.core.config import settings
 from src.core.logging import get_logger
 
@@ -173,6 +173,7 @@ def invoke_with_fallback(factory: LLMFactory, messages: list, **kwargs: Any) -> 
             errors.append(error_msg)
             log.warning("llm_invoke_failed", provider=provider, error=str(e))
 
+    metrics.increment("generate.errors", labels={"provider": "all_failed"})
     raise GenerationError(f"All LLM providers failed: {errors}")
 
 

@@ -95,8 +95,13 @@ class Settings(BaseSettings):
     # Observability
     langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
     langsmith_project: str = Field(default="deepresearcher", alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com", alias="LANGSMITH_ENDPOINT"
+    )
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     phoenix_url: str = Field(default="http://localhost:6006", alias="PHOENIX_URL")
+    enable_tracing: bool = Field(default=True, alias="ENABLE_TRACING")
+    metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
 
     # API
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
