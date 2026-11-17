@@ -95,6 +95,10 @@ class LLMFactory:
             temperature=overrides.get("temperature", settings.google_temperature),
             max_output_tokens=overrides.get("max_tokens", settings.google_max_tokens),
             google_api_key=settings.google_api_key,
+            timeout=settings.llm_timeout_seconds,
+            # Retries belong to our retry_policy/breaker: the SDK's own retry
+            # loop would multiply attempts and hide failures from the breaker.
+            max_retries=0,
         )
 
     def _build_openrouter(self, **overrides: Any) -> BaseChatModel:
@@ -108,6 +112,8 @@ class LLMFactory:
             temperature=overrides.get("temperature", settings.openrouter_temperature),
             api_key=SecretStr(settings.openrouter_api_key),
             base_url="https://openrouter.ai/api/v1",
+            timeout=settings.llm_timeout_seconds,
+            max_retries=0,
         )
 
     def _build_groq(self, **overrides: Any) -> BaseChatModel:
@@ -121,6 +127,8 @@ class LLMFactory:
             temperature=overrides.get("temperature", settings.groq_temperature),
             max_tokens=overrides.get("max_tokens", settings.groq_max_tokens),
             api_key=SecretStr(settings.groq_api_key),
+            timeout=settings.llm_timeout_seconds,
+            max_retries=0,
         )
 
     def get_fallback_chain(self) -> list[str]:
@@ -167,6 +175,17 @@ def _attempt_plan(
     return plan
 
 
+def _breaker_name(provider: str, degraded: bool = False) -> str:
+    """Breaker key for an attempt.
+
+    The degraded tier gets its own breaker on purpose: the usual failure is
+    "this model is overloaded/unavailable", which says nothing about the
+    smaller model on the same provider. Sharing a breaker would disable the
+    fallback exactly when it is needed.
+    """
+    return f"llm:{provider}:degraded" if degraded else f"llm:{provider}"
+
+
 def _invoke_once(
     factory: LLMFactory,
     provider: str,
@@ -175,6 +194,7 @@ def _invoke_once(
     model: str | None,
     temperature: float | None,
     kwargs: dict[str, Any],
+    degraded: bool = False,
 ) -> Any:
     """Invoke one provider, protected by retry + circuit breaker."""
     overrides: dict[str, Any] = {}
@@ -183,7 +203,7 @@ def _invoke_once(
     if temperature is not None:
         overrides["temperature"] = temperature
 
-    service = f"llm:{provider}"
+    service = _breaker_name(provider, degraded)
 
     def _call() -> Any:
         chat_model = factory.get_model(provider, **overrides)
@@ -232,7 +252,7 @@ def invoke_with_fallback(
         plan[0] = (plan[0][0], model, False)
 
     for attempt_provider, attempt_model, degraded in plan:
-        service = f"llm:{attempt_provider}"
+        service = _breaker_name(attempt_provider, degraded)
         try:
             log.info(
                 "llm_invoke_attempt",
@@ -247,6 +267,7 @@ def invoke_with_fallback(
                 model=attempt_model,
                 temperature=temperature,
                 kwargs=kwargs,
+                degraded=degraded,
             )
             log.info("llm_invoke_success", provider=attempt_provider, degraded=degraded)
             if outcome is not None:
@@ -304,7 +325,7 @@ def stream_with_fallback(
     errors: list[str] = []
 
     for attempt_provider, attempt_model, degraded in _attempt_plan(factory, provider):
-        breaker = breakers.get(f"llm:{attempt_provider}")
+        breaker = breakers.get(_breaker_name(attempt_provider, degraded))
         try:
             breaker.before_call()
         except CircuitOpenError as e:
@@ -349,7 +370,7 @@ async def astream_with_fallback(
     errors: list[str] = []
 
     for attempt_provider, attempt_model, degraded in _attempt_plan(factory, provider):
-        breaker = breakers.get(f"llm:{attempt_provider}")
+        breaker = breakers.get(_breaker_name(attempt_provider, degraded))
         try:
             breaker.before_call()
         except CircuitOpenError as e:

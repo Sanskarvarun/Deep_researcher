@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # LLM Providers (primary: Gemini, fallback: OpenRouter, optional: Groq)
     # Primary LLM - Google Gemini
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
-    google_model: str = Field(default="gemini-2.5-flash-lite", alias="GOOGLE_MODEL")
+    google_model: str = Field(default="gemini-flash-latest", alias="GOOGLE_MODEL")
     google_temperature: float = Field(default=0.1, alias="GOOGLE_TEMPERATURE")
     google_max_tokens: int = Field(default=4096, alias="GOOGLE_MAX_TOKENS")
 
@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     retry_max_attempts: int = Field(default=3, ge=1, le=10, alias="RETRY_MAX_ATTEMPTS")
     retry_base_delay: float = Field(default=0.5, ge=0.0, alias="RETRY_BASE_DELAY")
     retry_max_delay: float = Field(default=8.0, ge=0.0, alias="RETRY_MAX_DELAY")
+    # Per-request ceiling for provider SDK calls. Without this a provider that
+    # stalls never returns, so neither retries nor the breaker can ever fire.
+    llm_timeout_seconds: float = Field(default=60.0, ge=1.0, le=600.0, alias="LLM_TIMEOUT_SECONDS")
     circuit_failure_threshold: int = Field(default=5, ge=1, alias="CIRCUIT_FAILURE_THRESHOLD")
     circuit_recovery_timeout: float = Field(default=30.0, ge=0.0, alias="CIRCUIT_RECOVERY_TIMEOUT")
     circuit_half_open_max_calls: int = Field(default=1, ge=1, alias="CIRCUIT_HALF_OPEN_MAX_CALLS")
@@ -134,7 +137,7 @@ class Settings(BaseSettings):
     # Graceful degradation (large model -> small model on the same provider)
     degraded_model_enabled: bool = Field(default=True, alias="DEGRADED_MODEL_ENABLED")
     google_degraded_model: str = Field(
-        default="gemini-2.0-flash-lite", alias="GOOGLE_DEGRADED_MODEL"
+        default="gemini-flash-lite-latest", alias="GOOGLE_DEGRADED_MODEL"
     )
     openrouter_degraded_model: str = Field(
         default="meta-llama/llama-3.1-8b-instruct:free",

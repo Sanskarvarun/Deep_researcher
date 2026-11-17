@@ -2,6 +2,7 @@
 
 import pytest
 
+from src.core.config import settings
 from src.core.exceptions import CircuitOpenError, GenerationError
 from src.core.resilience import (
     CircuitBreaker,
@@ -11,7 +12,7 @@ from src.core.resilience import (
     is_transient_error,
     retry_policy,
 )
-from src.generation.llm import LLMFactory, invoke_with_fallback
+from src.generation.llm import LLMFactory, _breaker_name, invoke_with_fallback
 
 
 class FakeClock:
@@ -290,6 +291,39 @@ class TestGracefulDegradation:
             "degraded": False,
         }
 
+    def test_open_full_size_breaker_does_not_block_degraded_tier(self, monkeypatch):
+        """An overloaded big model must not disable its own small fallback:
+        the degraded tier gets an independent breaker."""
+        monkeypatch.setattr("src.generation.llm.settings.llm_fallbacks", [])
+        monkeypatch.setattr("src.generation.llm.settings.google_degraded_model", "small-model")
+        from src.core.resilience import breakers
+
+        factory = LLMFactory()
+        factory._clients["gemini::"] = FakeChatModel("should not be used")
+        factory._clients["gemini:small-model:"] = FakeChatModel("degraded answer")
+
+        breaker = breakers.get("llm:gemini")
+        for _ in range(settings.circuit_failure_threshold):
+            breaker.before_call()
+            breaker.record_failure()
+        assert breaker.state is CircuitState.OPEN
+
+        outcome: dict = {}
+        response = invoke_with_fallback(
+            factory,
+            [{"role": "user", "content": "hi"}],
+            provider="gemini",
+            outcome=outcome,
+        )
+
+        assert response == "degraded answer"
+        assert outcome["degraded"] is True
+        assert breakers.get("llm:gemini:degraded").state is CircuitState.CLOSED
+
+    def test_breaker_name_is_tier_specific(self):
+        assert _breaker_name("gemini") == "llm:gemini"
+        assert _breaker_name("gemini", degraded=True) == "llm:gemini:degraded"
+
     def test_skips_provider_with_open_circuit(self):
         from src.core.resilience import breakers
 
@@ -314,8 +348,11 @@ class TestGracefulDegradation:
 
     def test_all_providers_fail(self):
         factory = LLMFactory()
-        for name in ("gemini::", "openrouter::", "groq::"):
-            factory._clients[name] = FailingModel()
+        for provider in ("gemini", "openrouter", "groq"):
+            factory._clients[f"{provider}::"] = FailingModel()
+            degraded = factory.degraded_model(provider)
+            if degraded:
+                factory._clients[f"{provider}:{degraded}:"] = FailingModel()
 
         with pytest.raises(GenerationError):
             invoke_with_fallback(

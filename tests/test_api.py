@@ -183,6 +183,19 @@ class TestIngestValidation:
 
 
 class TestErrorHandling:
+    def test_unknown_route_uses_error_envelope(self, client):
+        response = client.get("/v1/models")
+        assert response.status_code == 404
+        body = response.json()
+        assert body["error"]["code"] == "NOT_FOUND"
+        assert body["error"]["request_id"]
+        assert "detail" not in body
+
+    def test_wrong_method_uses_error_envelope(self, client):
+        response = client.get("/api/v1/ask")
+        assert response.status_code == 405
+        assert response.json()["error"]["code"] == "METHOD_NOT_ALLOWED"
+
     def test_unhandled_error_returns_generic_envelope(self, monkeypatch):
         from src.api.app import create_app
 

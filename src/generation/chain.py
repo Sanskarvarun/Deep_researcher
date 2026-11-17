@@ -35,13 +35,34 @@ log = get_logger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+def _content_text(content: Any) -> str:
+    """Flatten LangChain message content into plain text.
+
+    Providers disagree on the shape: plain strings, typed blocks as objects
+    (``part.text``), or typed blocks as dicts (``{"type": "text", "text": …}``)
+    — the Gemini 3.x SDK uses the dict form. Anything that isn't recognised is
+    skipped rather than stringified, so answers never come back as Python reprs.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+
+    chunks: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            chunks.append(part)
+            continue
+        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+        if isinstance(text, str):
+            chunks.append(text)
+    return "".join(chunks)
+
+
 def _response_text(response: Any) -> str:
     """Extract plain text from an LLM response (AIMessage or str)."""
     if isinstance(response, BaseMessage):
-        content = response.content
-        if isinstance(content, list):
-            return "".join(str(part) for part in content)
-        return content or ""
+        return _content_text(response.content)
     if isinstance(response, str):
         return response
     return str(response)

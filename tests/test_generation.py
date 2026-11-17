@@ -23,7 +23,7 @@ from src.generation import (
     invoke_with_fallback,
     stream_with_fallback,
 )
-from src.generation.chain import _response_text
+from src.generation.chain import _content_text, _response_text
 from src.generation.llm import LLMFactory
 from src.retrieval.models import SearchResult
 
@@ -75,6 +75,19 @@ class AlwaysFailingModel:
 
     def stream(self, messages: list, **kwargs: Any) -> Any:
         raise RuntimeError("provider down")
+
+
+def _stub_every_tier(factory: LLMFactory, model_cls: type) -> None:
+    """Pre-seed clients for the full-size *and* degraded tiers.
+
+    The fallback plan includes the smaller degraded models, so stubbing only
+    the default keys would let the test reach a live provider.
+    """
+    for provider in ("gemini", "openrouter", "groq"):
+        factory._clients[f"{provider}::"] = model_cls()
+        degraded = factory.degraded_model(provider)
+        if degraded:
+            factory._clients[f"{provider}:{degraded}:"] = model_cls()
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +285,32 @@ class TestResponseText:
     def test_none_content(self):
         assert _response_text(AIMessage(content="")) == ""
 
+    def test_dict_text_blocks(self):
+        """Gemini 3.x returns typed content blocks as dicts, not objects."""
+        message = AIMessage(
+            content=[
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "world"},
+            ]
+        )
+        assert _response_text(message) == "Hello world"
+        assert "{" not in _response_text(message)
+
+    def test_object_text_blocks(self):
+        """Some providers hand back typed blocks as objects, not dicts."""
+        part = type("Part", (), {"text": "object block"})()
+        assert _content_text([part]) == "object block"
+
+    def test_mixed_and_non_text_blocks_are_skipped(self):
+        message = AIMessage(
+            content=[
+                {"type": "text", "text": "answer"},
+                {"type": "tool_use", "id": "tool-1"},
+                " tail",
+            ]
+        )
+        assert _response_text(message) == "answer tail"
+
 
 # ---------------------------------------------------------------------------
 # RAGGenerator
@@ -355,8 +394,7 @@ class TestFallbackChain:
 
     def test_invoke_with_fallback_all_fail(self):
         factory = LLMFactory()
-        factory._clients["gemini::"] = AlwaysFailingModel()
-        factory._clients["openrouter::"] = AlwaysFailingModel()
+        _stub_every_tier(factory, AlwaysFailingModel)
         with pytest.raises(GenerationError):
             invoke_with_fallback(
                 factory,

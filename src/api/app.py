@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.api.middleware import (
     BodySizeLimitMiddleware,
@@ -88,6 +89,24 @@ def create_app() -> FastAPI:
             exc.message,
             details=exc.details,
             request_id=request_id,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    def _handle_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Unknown routes and wrong methods bypass our AppError hierarchy; give
+        # them the same envelope so clients never have to parse two shapes.
+        code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}.get(exc.status_code, "HTTP_ERROR")
+        message = {
+            404: "Resource not found",
+            405: "Method not allowed for this resource",
+        }.get(exc.status_code, str(exc.detail))
+        headers = dict(getattr(exc, "headers", None) or {})
+        return error_response(
+            exc.status_code,
+            code,
+            message,
+            request_id=getattr(request.state, "request_id", None),
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)
