@@ -34,6 +34,8 @@ class FakeVectorStore:
     ) -> int:
         self.tenant_id_seen.append(tenant_id)
         self.document_hashes_seen.append(document_hash)
+        if document_hash:
+            self._existing_doc_hashes.add(document_hash)
         self.stored.extend(chunks)
         return len(chunks)
 
@@ -198,3 +200,131 @@ class TestVectorStoreDedupLogic:
         assert not store.content_hash_exists("chunk1")
         store._existing_chunk_hashes.add("chunk1")
         assert store.content_hash_exists("chunk1")
+
+
+class TestDeadLetterQueue:
+    """Tests for dead letter queue functionality."""
+
+    def test_add_and_get(self):
+        from src.ingestion.models import UUID, DeadLetterEntry, DeadLetterQueue, SourceType
+
+        queue = DeadLetterQueue()
+        entry = DeadLetterEntry(
+            document_id=UUID(int=1),
+            source="test.txt",
+            source_type=SourceType.TXT,
+            content_hash="abc123",
+            error="Test error",
+            error_type="TestError",
+            stage="parsing",
+        )
+        queue.add(entry)
+        assert len(queue.entries) == 1
+        retrieved = queue.get(UUID(int=1))
+        assert retrieved is not None
+        assert retrieved.error == "Test error"
+
+    def test_retry_increments_count(self):
+        from src.ingestion.models import UUID, DeadLetterEntry, DeadLetterQueue, SourceType
+
+        queue = DeadLetterQueue()
+        entry = DeadLetterEntry(
+            document_id=UUID(int=1),
+            source="test.txt",
+            source_type=SourceType.TXT,
+            content_hash="abc123",
+            error="Test error",
+            error_type="TestError",
+            stage="parsing",
+        )
+        queue.add(entry)
+        retried = queue.retry(UUID(int=1))
+        assert retried is not None
+        assert retried.retry_count == 1
+        assert retried.last_retry_at is not None
+
+    def test_remove_after_success(self):
+        from src.ingestion.models import UUID, DeadLetterEntry, DeadLetterQueue, SourceType
+
+        queue = DeadLetterQueue()
+        entry = DeadLetterEntry(
+            document_id=UUID(int=1),
+            source="test.txt",
+            source_type=SourceType.TXT,
+            content_hash="abc123",
+            error="Test error",
+            error_type="TestError",
+            stage="parsing",
+        )
+        queue.add(entry)
+        removed = queue.remove(UUID(int=1))
+        assert removed is True
+        assert len(queue.entries) == 0
+        assert queue.get(UUID(int=1)) is None
+
+    def test_max_size_eviction(self):
+        from src.ingestion.models import UUID, DeadLetterEntry, DeadLetterQueue, SourceType
+
+        queue = DeadLetterQueue(max_size=2)
+        for i in range(3):
+            entry = DeadLetterEntry(
+                document_id=UUID(int=i),
+                source=f"test{i}.txt",
+                source_type=SourceType.TXT,
+                content_hash=f"hash{i}",
+                error="error",
+                error_type="Error",
+                stage="parsing",
+            )
+            queue.add(entry)
+        assert len(queue.entries) == 2
+        # First entry should be evicted
+        assert queue.get(UUID(int=0)) is None
+        assert queue.get(UUID(int=1)) is not None
+        assert queue.get(UUID(int=2)) is not None
+
+
+class TestIncrementalUpdate:
+    """Tests for incremental update functionality."""
+
+    def test_needs_update_new_file(self, pipeline, sample_file):
+        needs, reason = pipeline.needs_update(str(sample_file))
+        assert needs is True
+        assert reason in ("changed_or_new", "unchanged")
+
+    def test_incremental_ingest_skips_unchanged(self, pipeline, sample_file):
+        # First ingestion
+        r1 = pipeline.incremental_ingest(str(sample_file), tenant_id="tenant_a")
+        assert r1.status == DocumentStatus.COMPLETED
+        assert r1.chunks_created > 0
+
+        # Second ingestion - should skip
+        r2 = pipeline.incremental_ingest(str(sample_file), tenant_id="tenant_a")
+        assert r2.status == DocumentStatus.COMPLETED
+        assert r2.chunks_created == 0
+        assert r2.chunks_skipped == -1
+        assert "skipped" in r2.metadata.get("reason", "")
+
+    def test_failure_adds_to_dead_letter(self, pipeline, tmp_path):
+        """Failed ingestion adds entry to dead letter queue."""
+        from src.ingestion.models import dead_letter_queue
+
+        # Clear queue first
+        dead_letter_queue.clear()
+
+        bad = tmp_path / "bad.xyz"
+        bad.write_text("x")
+
+        result = pipeline.ingest_file(str(bad))
+        assert result.status == DocumentStatus.FAILED
+
+        # Check dead letter queue
+        # Note: document_id is nil UUID for failed loads before document creation
+        entries = [
+            e for e in dead_letter_queue.entries if e.error_type == "DocumentProcessingError"
+        ]
+        assert len(entries) > 0
+        entry = entries[-1]
+        assert entry.error_type == "DocumentProcessingError"
+        assert entry.stage == "unknown"
+        assert entry.retry_count == 0

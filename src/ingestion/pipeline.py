@@ -9,6 +9,7 @@ Usage:
     result = pipeline.ingest_file("data/docs/paper.pdf")
 """
 
+import pathlib
 import time
 from dataclasses import dataclass
 from uuid import UUID
@@ -86,6 +87,7 @@ class IngestionPipeline:
             IngestionResult with status, chunk counts, error (if any).
         """
         start = time.perf_counter()
+        document = None  # Initialize to handle exceptions before document creation
 
         try:
             # 0. Validate
@@ -161,8 +163,30 @@ class IngestionPipeline:
         except Exception as e:
             duration_ms = (time.perf_counter() - start) * 1000
             log.error("ingestion_failed", source=source, error=str(e))
+
+            # Add to dead letter queue for later retry/inspection
+            from src.ingestion.models import DeadLetterEntry, SourceType, dead_letter_queue
+
+            doc_id = document.id if document is not None else UUID(int=0)
+            content_hash = document.content_hash if document is not None else ""
+            source_type = document.source_type if document is not None else SourceType.UNKNOWN
+
+            dead_letter_queue.add(
+                DeadLetterEntry(
+                    document_id=doc_id,
+                    source=source,
+                    source_type=source_type,
+                    content_hash=content_hash,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    stage="unknown",
+                    tenant_id=tenant_id,
+                    payload={"source": source, "tenant_id": tenant_id},
+                )
+            )
+
             return IngestionResult(
-                document_id=UUID(int=0),  # nil UUID for failed ingests
+                document_id=doc_id,
                 source=source,
                 status=DocumentStatus.FAILED,
                 error=str(e),
@@ -231,6 +255,25 @@ class IngestionPipeline:
             )
         except Exception as e:
             log.error("ingestion_failed", source=document.source, error=str(e))
+            from src.ingestion.models import DeadLetterEntry, dead_letter_queue
+
+            dead_letter_queue.add(
+                DeadLetterEntry(
+                    document_id=document.id,
+                    source=document.source,
+                    source_type=document.source_type,
+                    content_hash=document.content_hash,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    stage="unknown",
+                    tenant_id=tenant_id,
+                    payload={
+                        "source": document.source,
+                        "tenant_id": tenant_id,
+                        "content": document.content[:100],
+                    },
+                )
+            )
             return IngestionResult(
                 document_id=document.id,
                 source=document.source,
@@ -250,3 +293,75 @@ class IngestionPipeline:
         so re-uploads are caught before any embedding calls are made.
         """
         return self.vectorstore.document_hash_exists(content_hash, tenant_id)
+
+    def _get_file_fingerprint(self, path: str) -> tuple[int, int, float] | None:
+        """Get file fingerprint: (size_bytes, mtime_ns, content_hash_prefix).
+
+        Returns None if file doesn't exist.
+        """
+        from pathlib import Path
+
+        try:
+            stat = Path(path).stat()
+            return (stat.st_size, int(stat.st_mtime_ns), 0)  # hash prefix computed lazily
+        except OSError:
+            return None
+
+    def needs_update(self, source: str, tenant_id: str | None = None) -> tuple[bool, str]:
+        """Check if a document needs re-ingestion.
+
+        Args:
+            source: File path or URL.
+            tenant_id: Tenant for isolation.
+
+        Returns:
+            (needs_update, reason): True if document needs re-ingestion.
+        """
+        # Only works for local files
+
+        if not pathlib.Path(source).exists():
+            return True, "file_not_found"
+
+        # Get current file fingerprint
+        current_fp = self._get_file_fingerprint(source)
+        if current_fp is None:
+            return True, "cannot_stat"
+
+        # Check if document exists with same content hash
+        from src.ingestion.loaders import load_document
+
+        document = load_document(source)
+        if self._document_exists(document.content_hash, tenant_id):
+            return False, "unchanged"
+
+        return True, "changed_or_new"
+
+    def incremental_ingest(self, source: str, tenant_id: str | None = None) -> IngestionResult:
+        """Ingest a document only if it has changed since last ingestion.
+
+        Args:
+            source: File path or URL.
+            tenant_id: Tenant for isolation.
+
+        Returns:
+            IngestionResult with status indicating if ingestion happened or was skipped.
+        """
+        needs_update, reason = self.needs_update(source, tenant_id)
+        if not needs_update:
+            log.info("incremental_ingest_skipped", source=source, reason=reason)
+            # Load document to get its ID for the result
+            from src.ingestion.loaders import load_document
+
+            document = load_document(source)
+            return IngestionResult(
+                document_id=document.id,
+                source=source,
+                status=DocumentStatus.COMPLETED,
+                chunks_created=0,
+                chunks_skipped=-1,
+                duration_ms=0.0,
+                metadata={"reason": f"skipped: {reason}"},
+            )
+
+        log.info("incremental_ingest_started", source=source, reason=reason)
+        return self.ingest_file(source, tenant_id)

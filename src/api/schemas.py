@@ -112,6 +112,45 @@ class IngestResponse(BaseModel):
     tenant_id: str
 
 
+class IngestBatchRequest(BaseModel):
+    """Request to ingest multiple files."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    paths: list[str] = Field(min_length=1, max_length=100)
+    tenant_id: str = Field(default="default", pattern=_TENANT_PATTERN)
+    incremental: bool = False
+
+
+class IngestBatchResult(BaseModel):
+    """Result for a single file in a batch."""
+
+    source: str
+    status: str
+    document_id: str | None = None
+    chunks_created: int = 0
+    chunks_skipped: int = 0
+    error: str | None = None
+
+
+class IngestBatchResponse(BaseModel):
+    """Result of a batch ingestion request."""
+
+    total: int
+    completed: int
+    failed: int
+    results: list[IngestBatchResult]
+
+
+class TaskStatusResponse(BaseModel):
+    """Status of an async task."""
+
+    task_id: str
+    status: str  # pending, started, progress, success, failure, revoked
+    result: dict | None = None
+    traceback: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Liveness/readiness payload."""
 

@@ -111,3 +111,65 @@ class IngestionResult(BaseModel):
     error: str | None = None
     duration_ms: float = 0.0
     metadata: dict = Field(default_factory=dict)
+
+
+class DeadLetterEntry(BaseModel):
+    """A document that failed ingestion, stored for later retry/inspection."""
+
+    id: UUID = Field(default_factory=uuid4)
+    document_id: UUID
+    source: str
+    source_type: SourceType
+    content_hash: str
+    error: str
+    error_type: str  # e.g., "ParsingError", "EmbeddingError", "UpsertError"
+    stage: str  # "parsing", "chunking", "embedding", "upserting"
+    tenant_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    retry_count: int = 0
+    last_retry_at: datetime | None = None
+    payload: dict = Field(default_factory=dict)  # original document data for retry
+
+
+class DeadLetterQueue(BaseModel):
+    """In-memory dead letter queue (Redis-backed in production)."""
+
+    entries: list[DeadLetterEntry] = Field(default_factory=list)
+    max_size: int = 1000
+
+    def add(self, entry: DeadLetterEntry) -> None:
+        if len(self.entries) >= self.max_size:
+            # Remove oldest entry
+            self.entries.pop(0)
+        self.entries.append(entry)
+
+    def get(self, doc_id: UUID) -> DeadLetterEntry | None:
+        for entry in self.entries:
+            if entry.document_id == doc_id:
+                return entry
+        return None
+
+    def retry(self, doc_id: UUID) -> DeadLetterEntry | None:
+        """Mark an entry for retry."""
+        entry = self.get(doc_id)
+        if entry:
+            entry.retry_count += 1
+            entry.last_retry_at = datetime.now(UTC)
+        return entry
+
+    def remove(self, doc_id: UUID) -> bool:
+        """Remove an entry after successful retry."""
+        for i, entry in enumerate(self.entries):
+            if entry.document_id == doc_id:
+                self.entries.pop(i)
+                return True
+        return False
+
+    def clear(self) -> int:
+        count = len(self.entries)
+        self.entries.clear()
+        return count
+
+
+# Global dead letter queue instance
+dead_letter_queue = DeadLetterQueue()
