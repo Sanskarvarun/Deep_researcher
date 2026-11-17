@@ -187,21 +187,32 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 **Goal**: Multi-step reasoning, tool use, planning.
 
-### 3.1 LangGraph Agent
-- [ ] State: messages, retrieved_docs, citations, plan
-- [ ] Nodes: retrieve, rerank, generate, reflect, tool_use
-- [ ] Conditional routing, checkpointing, human-in-the-loop
+### 3.1 LangGraph Agent ✅
+- [x] State: messages, retrieved_docs, citations, plan
+  - `src/agent/state.py` — `AgentState` TypedDict with all required fields
+  - `create_initial_state()` factory function
+- [x] Nodes: retrieve, rerank, generate, reflect, tool_use
+  - `src/agent/nodes.py` — All five nodes implemented
+  - `RetrieveTool`, `RerankTool`, `GenerateTool`, `ReflectTool`, `CalculatorTool`
+- [x] Conditional routing
+  - `route_to_tool()` and `should_continue()` for dynamic routing
+  - `StateGraph` with conditional edges between all nodes
+- [ ] Checkpointing (LangGraph built-in, not yet configured)
+- [ ] Human-in-the-loop (not yet implemented)
 
 ### 3.2 Tools
-- [ ] `RetrieveTool`, `RerankTool`, `SummarizeTool`
-- [ ] `CalculatorTool`, `WebSearchTool`, `CodeExecutionTool`
+- [x] `RetrieveTool`, `RerankTool`, `GenerateTool`, `ReflectTool`, `CalculatorTool`
+  - `src/agent/tools.py` — All tools implemented as LangChain BaseTool subclasses
+  - Lazy initialization to avoid Qdrant lock conflicts at import time
+- [ ] `SummarizeTool`
+- [ ] `WebSearchTool`, `CodeExecutionTool`
 - [ ] Dynamic tool selection by query type
 
 ### 3.3 Agentic Patterns
-- [ ] Query decomposition
-- [ ] Iterative retrieval (retrieve → reflect → retrieve)
-- [ ] Self-correction (verify citations, retry on hallucination)
-- [ ] Planning before acting
+- [x] Query decomposition (via `plan_node` creating execution plan)
+- [x] Iterative retrieval (via `reflect` node feeding back to `rerank`/`generate`)
+- [x] Self-correction (via `reflect` tool identifying issues)
+- [ ] Planning before acting (partial - basic plan created, not yet LLM-driven)
 - [ ] Multi-hop reasoning
 
 ### 3.4 Memory
@@ -209,6 +220,8 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [ ] Long-term memory (vector store)
 
 ---
+
+*Plan Version 3.1 | Last Updated: 2026-11-17*
 
 ## Phase 4: Advanced RAG Techniques (Week 7-8)
 
