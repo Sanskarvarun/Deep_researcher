@@ -107,11 +107,16 @@ class RAGPromptBuilder:
         self.few_shots = few_shots or []
 
     def build_context(self, results: list) -> str:
-        """Format retrieval results into a context block with doc_id labels."""
+        """Format retrieval results into a context block with doc_id labels.
+
+        Uses short stable keys (doc-1, doc-2, ...) that match what the
+        CitationTracker will emit, so the LLM's citations align with the
+        sources list.
+        """
         lines: list[str] = []
-        for result in results:
-            doc_id = result.document_id or result.id
-            label = f"[{doc_id}]"
+        for i, result in enumerate(results):
+            short_key = f"doc-{i + 1}"
+            label = f"[{short_key}]"
             content = result.content.strip()
             lines.append(f"{label} {content}")
         return "\n".join(lines)

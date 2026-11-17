@@ -75,6 +75,28 @@ async def health() -> HealthResponse:
     )
 
 
+@router.get("/debug/retrieve", tags=["debug"], dependencies=[Depends(require_api_key)])
+async def debug_retrieve(q: str = "DeepResearcher", top_k: int = 5) -> dict:
+    """Debug endpoint: show raw retrieval results."""
+    from src.retrieval.retriever import Retriever
+
+    r = Retriever()
+    results = r.search(q, top_k=top_k)
+    return {
+        "query": q,
+        "top_k": top_k,
+        "results": [
+            {
+                "chunk_index": res.chunk_index,
+                "document_id": str(res.document_id) if res.document_id else None,
+                "score": res.score,
+                "content_preview": res.content[:200],
+            }
+            for res in results
+        ],
+    }
+
+
 @router.post(
     "/api/v1/ask",
     response_model=AskResponse,

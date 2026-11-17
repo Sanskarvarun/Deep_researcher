@@ -32,18 +32,26 @@ class CitationTracker:
         self._citations: dict[str, Citation] = {}
         self._key_for_chunk: dict[str, str] = {}
 
-    def add(self, result: SearchResult) -> str:
-        """Register a search result and return its citation key."""
+    def add(self, result: SearchResult, *, index: int | None = None) -> str:
+        """Register a search result and return its citation key.
+
+        Args:
+            result: The search result to register.
+            index: Optional 0-based position in the results list. If provided,
+                this is used to generate a stable short key (doc-1, doc-2, ...)
+                that matches the prompt builder. If not provided, falls back
+                to a document_id-based key.
+        """
         chunk_id = result.id
         if chunk_id in self._key_for_chunk:
             return self._key_for_chunk[chunk_id]
 
-        key = str(result.document_id or chunk_id)
-        base_key = key
-        counter = 1
-        while key in self._citations:
-            key = f"{base_key}-{counter}"
-            counter += 1
+        # Use a short, stable key matching the prompt builder
+        if index is not None:
+            key = f"doc-{index + 1}"
+        else:
+            doc_id_str = str(result.document_id) if result.document_id else str(chunk_id)
+            key = doc_id_str
 
         citation = Citation(
             key=key,

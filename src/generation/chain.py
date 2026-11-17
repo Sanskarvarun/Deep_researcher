@@ -235,8 +235,8 @@ class RAGGenerator:
 
             # Register citations and rewrite the answer to use inline markers.
             tracker = CitationTracker()
-            for result in results:
-                tracker.add(result)
+            for i, result in enumerate(results):
+                tracker.add(result, index=i)
             sources_markdown = tracker.format_references()
 
             result = GenerationResult(

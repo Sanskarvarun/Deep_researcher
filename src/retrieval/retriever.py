@@ -148,11 +148,13 @@ class Retriever:
         # Cache key based on corpus + query + all search parameters. The
         # collection and embedding model must be part of the key: the same
         # query against a different corpus/embedder is a different result set.
+        # Include collection_version so the cache invalidates when the corpus changes.
         filter_key = str(filter) if filter else "none"
         cache_key = make_cache_key(
             "ret",
             self._vectorstore.collection,
             getattr(self.embedder, "model_name", type(self.embedder).__name__),
+            self._vectorstore.collection_version(),
             query,
             search_type.value,
             top_k,

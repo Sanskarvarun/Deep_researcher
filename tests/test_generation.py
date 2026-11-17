@@ -152,8 +152,8 @@ class TestRAGPromptBuilder:
         builder = RAGPromptBuilder()
         results = [_make_result("doc-a", "alpha content"), _make_result("doc-b", "beta content")]
         context = builder.build_context(results)
-        assert "[chunk-doc-a]" in context
-        assert "[chunk-doc-b]" in context
+        assert "[doc-1]" in context
+        assert "[doc-2]" in context
         assert "alpha content" in context
         assert "beta content" in context
 
@@ -163,7 +163,7 @@ class TestRAGPromptBuilder:
         roles = [m["role"] for m in messages]
         assert roles == ["system", "user"]
         assert "what is RAG?" in messages[-1]["content"]
-        assert "[chunk-doc-a]" in messages[-1]["content"]
+        assert "[doc-1]" in messages[-1]["content"]
 
     def test_few_shots_are_included(self):
         builder = RAGPromptBuilder(

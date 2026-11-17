@@ -6,6 +6,7 @@ memory usage reasonable.
 """
 
 from datetime import datetime
+from threading import Lock
 from uuid import UUID
 
 from qdrant_client import QdrantClient
@@ -18,6 +19,42 @@ from src.ingestion.metadata import compute_content_hash
 from src.ingestion.models import EmbeddedChunk, QdrantPoint
 
 log = get_logger(__name__)
+
+# Embedded Qdrant (`QDRANT_URL=<path>`) locks its storage file, so a process can
+# only have ONE client per path. In the API the retriever and the ingestion
+# pipeline are separate singletons; without sharing they race for the lock and
+# ingest fails with "already accessed by another instance". `:memory:` is
+# deliberately excluded — those clients must stay isolated (tests rely on it).
+_client_lock = Lock()
+_shared_clients: dict[str, QdrantClient] = {}
+_collection_versions: dict[str, int] = {}
+
+
+def _create_client(url: str, api_key: str | None, timeout: int = 30) -> QdrantClient:
+    client_kwargs: dict = {"timeout": timeout}
+    if url == ":memory:":
+        return QdrantClient(location=":memory:", **client_kwargs)
+    if url.startswith(("http://", "https://")) or url.startswith("localhost"):
+        return QdrantClient(
+            url=url,
+            api_key=api_key or settings.qdrant_api_key,
+            prefer_grpc=settings.qdrant_prefer_grpc,
+            **client_kwargs,
+        )
+    return QdrantClient(path=url, **client_kwargs)
+
+
+def _get_client(url: str, api_key: str | None) -> QdrantClient:
+    """Return a shared client for ``url`` (or an isolated one for memory mode)."""
+    if url == ":memory:":
+        return _create_client(url, api_key)
+    key = f"{url}|{api_key or ''}"
+    with _client_lock:
+        client = _shared_clients.get(key)
+        if client is None:
+            client = _create_client(url, api_key)
+            _shared_clients[key] = client
+    return client
 
 
 class VectorStore:
@@ -32,20 +69,7 @@ class VectorStore:
         self.url = url or settings.qdrant_url
         self.collection = collection or settings.qdrant_collection
 
-        client_kwargs: dict = {"timeout": 30}
-        if self.url == ":memory:":
-            # In-memory mode — used by tests and smoke runs (no server needed)
-            self.client = QdrantClient(location=":memory:", **client_kwargs)
-        elif self.url.startswith(("http://", "https://")) or self.url.startswith("localhost"):
-            self.client = QdrantClient(
-                url=self.url,
-                api_key=api_key or settings.qdrant_api_key,
-                prefer_grpc=settings.qdrant_prefer_grpc,
-                **client_kwargs,
-            )
-        else:
-            # Treat as a local file path (embedded storage, persists to disk)
-            self.client = QdrantClient(path=self.url, **client_kwargs)
+        self.client = _get_client(self.url, api_key)
 
         log.info("vectorstore_initialized", url=self.url, collection=self.collection)
 
@@ -279,7 +303,23 @@ class VectorStore:
             skipped_dedup=skipped,
             collection=self.collection,
         )
+        self._increment_version()
         return upserted
+
+    def _increment_version(self) -> None:
+        """Bump the in-process collection version (for cache invalidation)."""
+        with _client_lock:
+            key = f"{self.url}|{self.collection}"
+            _collection_versions[key] = _collection_versions.get(key, 0) + 1
+
+    def collection_version(self) -> int:
+        """Return a version number that increments on every upsert.
+
+        Used to invalidate retrieval cache when the corpus changes.
+        """
+        with _client_lock:
+            key = f"{self.url}|{self.collection}"
+            return _collection_versions.get(key, 0)
 
     # ------------------------------------------------------------------
     # Reads
