@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import pathlib
 from typing import Any, cast
 
+import httpx
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from src.core.config import settings
 from src.core.logging import get_logger
 from src.generation.chain import RAGGenerator
 from src.retrieval.retriever import Retriever
@@ -434,7 +437,7 @@ class SummarizeTool(BaseTool):
     name: str = "summarize"
     description: str = (
         "Summarize a long text into a concise summary. "
-        "Useful for condensing retrieved documents or long answers."
+        "Uses an LLM for abstractive summarization with optional focus area."
     )
     args_schema: type[BaseModel] = SummarizeInput
 
@@ -444,17 +447,30 @@ class SummarizeTool(BaseTool):
         max_length: int = 200,
         focus: str | None = None,
     ) -> dict[str, Any]:
-        log.info("tool_summarize", text_length=len(text), max_length=max_length)
+        log.info("tool_summarize", text_length=len(text), max_length=max_length, focus=focus)
 
-        # For now, use a simple truncation-based summary
-        # In production, this would use an LLM
         if len(text) <= max_length:
             return {"summary": text, "original_length": len(text), "summary_length": len(text)}
 
-        # Simple extractive summary: take first and last sentences
-        sentences = text.split(". ")
-        summary = text[:max_length] if len(sentences) <= 2 else ". ".join(sentences[:2]) + "..."
+        # Use LLM for abstractive summarization
+        from src.generation.chain import RAGGenerator
 
+        generator = RAGGenerator()
+        prompt = f"""Summarize the following text in at most {max_length} characters.
+{f"Focus on: {focus}." if focus else ""}
+
+Text:
+{text[:8000]}  # Limit input length
+
+Summary:"""
+
+        response = generator.generate(
+            prompt,
+            [],  # No retrieval needed
+            temperature=0.3,
+        )
+
+        summary = response.answer
         if len(summary) > max_length:
             summary = summary[: max_length - 3] + "..."
 
@@ -478,45 +494,204 @@ class WebSearchInput(BaseModel):
 
     query: str = Field(description="Search query")
     max_results: int = Field(default=5, description="Maximum number of results")
-    source: str = Field(default="news", description="Search source: news, general, academic")
+    source: str = Field(default="auto", description="Search source: auto, serpapi, brave, google")
 
 
 class WebSearchTool(BaseTool):
-    """Search the web for current information."""
+    """Search the web for current information using multiple providers.
+
+    Supports SerpAPI, Brave Search, and Google Custom Search.
+    Automatically falls back between providers if one fails.
+    """
 
     name: str = "web_search"
     description: str = (
         "Search the web for current information not in the knowledge base. "
-        "Returns search results with snippets and URLs."
+        "Returns search results with snippets and URLs. "
+        "Supports SerpAPI, Brave Search, and Google Custom Search."
     )
     args_schema: type[BaseModel] = WebSearchInput
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def _search_serpapi(self, query: str, max_results: int) -> list[dict[str, Any]]:
+        """Search using SerpAPI."""
+        if not settings.serpapi_key:
+            return []
+        try:
+            params: dict[str, str | int] = {
+                "q": query,
+                "api_key": settings.serpapi_key,
+                "num": max_results,
+                "engine": "google",
+            }
+            response = await self.client.get("https://serpapi.com/search", params=params)
+            response.raise_for_status()
+            data = response.json()
+            organic = data.get("organic_results", [])
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "snippet": r.get("snippet", ""),
+                    "url": r.get("link", ""),
+                    "source": "serpapi",
+                }
+                for r in organic[:max_results]
+            ]
+        except Exception as e:
+            log.warning("serpapi_search_failed", error=str(e))
+            return []
+
+    async def _search_brave(self, query: str, max_results: int) -> list[dict[str, Any]]:
+        """Search using Brave Search API."""
+        if not settings.brave_search_key:
+            return []
+        try:
+            headers = {
+                "Accept": "application/json",
+                "X-Subscription-Token": settings.brave_search_key,
+            }
+            params: dict[str, str | int] = {"q": query, "count": max_results}
+            response = await self.client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers=headers,
+                params=params,
+            )
+            response.raise_for_status()
+            data = response.json()
+            web = data.get("web", {}).get("results", [])
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "snippet": r.get("description", ""),
+                    "url": r.get("url", ""),
+                    "source": "brave",
+                }
+                for r in web[:max_results]
+            ]
+        except Exception as e:
+            log.warning("brave_search_failed", error=str(e))
+            return []
+
+    async def _search_google(self, query: str, max_results: int) -> list[dict[str, Any]]:
+        """Search using Google Custom Search API."""
+        if not settings.google_search_key or not settings.google_search_cx:
+            return []
+        try:
+            params: dict[str, str | int] = {
+                "key": settings.google_search_key,
+                "cx": settings.google_search_cx,
+                "q": query,
+                "num": min(max_results, 10),
+            }
+            response = await self.client.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=params,
+            )
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("items", [])
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "snippet": r.get("snippet", ""),
+                    "url": r.get("link", ""),
+                    "source": "google",
+                }
+                for r in items[:max_results]
+            ]
+        except Exception as e:
+            log.warning("google_search_failed", error=str(e))
+            return []
+
+    async def _run_async(
+        self,
+        query: str,
+        max_results: int = 5,
+        source: str = "auto",
+    ) -> dict[str, Any]:
+        log.info("tool_web_search", query=query, max_results=max_results, source=source)
+
+        # Determine which providers to use
+        providers = []
+        if source == "auto":
+            providers = ["serpapi", "brave", "google"]
+        elif source == "serpapi":
+            providers = ["serpapi"]
+        elif source == "brave":
+            providers = ["brave"]
+        elif source == "google":
+            providers = ["google"]
+        else:
+            providers = ["serpapi", "brave", "google"]
+
+        all_results: list[dict[str, Any]] = []
+
+        for provider in providers:
+            if provider == "serpapi":
+                results = await self._search_serpapi(query, max_results)
+            elif provider == "brave":
+                results = await self._search_brave(query, max_results)
+            elif provider == "google":
+                results = await self._search_google(query, max_results)
+            else:
+                continue
+
+            if results:
+                all_results.extend(results)
+                if len(all_results) >= max_results:
+                    break
+
+            # Small delay between providers to be respectful
+            await asyncio.sleep(0.1)
+
+        # Deduplicate by URL
+        seen_urls: set[str] = set()
+        unique_results = []
+        for r in all_results:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_results.append(r)
+
+        return {
+            "query": query,
+            "results": unique_results[:max_results],
+            "sources_used": list({r["source"] for r in unique_results}),
+        }
 
     def _run(
         self,
         query: str,
         max_results: int = 5,
-        source: str = "news",
+        source: str = "auto",
     ) -> dict[str, Any]:
-        log.info("tool_web_search", query=query, max_results=max_results)
+        """Sync wrapper for async search."""
+        import asyncio
 
-        # Placeholder - in production, this would call a search API
-        # like SerpAPI, Google Custom Search, or Brave Search API
-        return {
-            "query": query,
-            "results": [
-                {
-                    "title": f"Result {i} for: {query}",
-                    "snippet": f"This is a placeholder snippet for result {i} about {query}.",
-                    "url": f"https://example.com/result-{i}",
-                    "source": source,
-                }
-                for i in range(1, max_results + 1)
-            ],
-            "note": "Web search tool is a placeholder. Configure a real search API for production.",
-        }
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self._run(*args, **kwargs)
+        return loop.run_until_complete(self._run_async(query, max_results, source))
+
+    async def _arun(
+        self,
+        query: str,
+        max_results: int = 5,
+        source: str = "auto",
+    ) -> dict[str, Any]:
+        return await self._run_async(query, max_results, source)
 
 
 # ---------------------------------------------------------------------------
@@ -544,19 +719,55 @@ class CodeExecutionTool(BaseTool):
 
     def _run(self, code: str, timeout: int = 30) -> dict[str, Any]:
         import subprocess
+        import sys
         import tempfile
 
         log.info("tool_code_execution", code_length=len(code))
 
+        # Create a sandboxed execution environment
+        # Use a restricted Python environment
+        sandbox_code = f"""
+import sys
+import builtins
+
+# Restrict builtins for safety
+_allowed_builtins = {{
+    'print', 'len', 'range', 'enumerate', 'zip', 'map', 'filter',
+    'sum', 'min', 'max', 'abs', 'round', 'sorted', 'reversed',
+    'list', 'dict', 'set', 'tuple', 'str', 'int', 'float', 'bool',
+    'isinstance', 'hasattr', 'getattr', 'setattr', 'type',
+    'Exception', 'ValueError', 'TypeError', 'IndexError', 'KeyError',
+    'StopIteration', 'ArithmeticError', 'ZeroDivisionError',
+}}
+
+# Replace builtins
+import builtins
+original_builtins = dict(builtins.__dict__)
+for name in list(builtins.__dict__.keys()):
+    if name not in _allowed_builtins:
+        delattr(builtins, name)
+
+# Execute user code
+try:
+    exec('''{code}''', {{}})
+except Exception as e:
+    print(f"ERROR: {{type(e).__name__}}: {{e}}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    # Restore builtins
+    builtins.__dict__.clear()
+    builtins.__dict__.update(original_builtins)
+"""
+
         # Write code to a temporary file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(code)
+            f.write(sandbox_code)
             temp_path = f.name
 
         try:
             # Run with timeout
             result = subprocess.run(
-                ["python", temp_path],
+                [sys.executable, temp_path],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -689,3 +900,70 @@ def select_tools_for_query(
             unique_selected.append(tool)
 
     return unique_selected
+
+
+# ---------------------------------------------------------------------------
+# LLM-based Dynamic Tool Selection (Production-ready)
+# ---------------------------------------------------------------------------
+
+
+def select_tools_for_query_llm(
+    query: str,
+    available_tools: list[BaseTool] | None = None,
+) -> list[BaseTool]:
+    """Select relevant tools using an LLM for intelligent tool selection.
+
+    This is the production-ready version that uses an LLM to intelligently
+    select tools based on the query, rather than simple keyword matching.
+    """
+    if available_tools is None:
+        available_tools = get_all_tools()
+
+    tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in available_tools)
+
+    prompt = f"""Given the user query, select the most relevant tools from those available.
+
+User Query: {query}
+
+Available Tools:
+{tool_descriptions}
+
+Select the most relevant tools (return tool names only, one per line).
+Consider:
+- Does the query need external information? (web_search)
+- Does it need calculations? (calculator)
+- Does it need code execution? (code_execution)
+- Does it need document retrieval? (retrieve)
+- Does it need reranking? (rerank)
+- Does it need summarization? (summarize)
+- Does it need reflection/quality check? (reflect)
+- Does it need answer generation? (generate)
+
+Tool names (one per line):"""
+
+    from src.generation.chain import RAGGenerator
+
+    generator = RAGGenerator()
+    response = generator.generate(
+        prompt,
+        [],
+        temperature=0.1,
+    )
+
+    # Parse selected tool names
+    selected_names = [
+        line.strip()
+        for line in response.answer.split("\n")
+        if line.strip() and line.strip() in [t.name for t in available_tools]
+    ]
+
+    # Map names to tools
+    tool_map = {t.name: t for t in available_tools}
+    selected = [tool_map[name] for name in selected_names if name in tool_map]
+
+    # Always include retrieve and generate for RAG
+    for tool in available_tools:
+        if tool.name in ("retrieve", "generate") and tool not in selected:
+            selected.insert(0, tool)  # Put at front
+
+    return selected

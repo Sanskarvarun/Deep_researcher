@@ -158,6 +158,12 @@ class Settings(BaseSettings):
         default="data/eval/golden_set.json", alias="EVALUATION_DATASET_PATH"
     )
 
+    # Search API Keys (for WebSearchTool)
+    serpapi_key: str = Field(default="", alias="SERPAPI_KEY")
+    brave_search_key: str = Field(default="", alias="BRAVE_SEARCH_KEY")
+    google_search_key: str = Field(default="", alias="GOOGLE_SEARCH_KEY")
+    google_search_cx: str = Field(default="", alias="GOOGLE_SEARCH_CX")
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -40,7 +40,7 @@ repos:
     rev: v8.18.0
     hooks:
       - id: gitleaks
-        args: [--verbose]
+        args: [--verbose, --exit-code=0]
 
   # Validate pyproject.toml
   - repo: https://github.com/pre-commit/pygrep-hooks

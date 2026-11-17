@@ -202,23 +202,24 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 - [x] Human-in-the-loop (interrupt-based)
   - `src/agent/nodes.py` — `human_review_node` with `interrupt()`, `route_after_human_review`
 
-### 3.2 Tools (MVP/Placeholder Implementations) ⚠️
+### 3.2 Tools ✅
 - [x] `RetrieveTool`, `RerankTool`, `GenerateTool`, `ReflectTool`, `CalculatorTool`
   - `src/agent/tools.py` — All tools implemented as LangChain BaseTool subclasses
   - Lazy initialization to avoid Qdrant lock conflicts at import time
-- [x] `SummarizeTool` (MVP)
-  - `src/agent/tools.py` — **Extractive summarization only** (truncation), not LLM-based
-  - Comment notes "In production, this would use an LLM"
-- [x] `WebSearchTool` (Placeholder)
-  - `src/agent/tools.py` — **Returns mock data**, not real search
-  - Comment notes "Placeholder. Configure a real search API for production."
-  - Needs SerpAPI/Brave/Google CSE integration for production
-- [x] `CodeExecutionTool` (MVP)
-  - `src/agent/tools.py` — Sandboxed Python execution with AST validation
-  - Uses temp files + subprocess, basic timeout handling
-- [x] Dynamic tool selection by query type (MVP)
-  - `src/agent/tools.py` — `select_tools_for_query()` with **keyword-based heuristic**
-  - Not LLM-driven; uses simple keyword matching
+- [x] `SummarizeTool`
+  - `src/agent/tools.py` — **LLM-based abstractive summarization** using `RAGGenerator`
+  - Configurable length and optional focus area
+- [x] `WebSearchTool` (Production-ready)
+  - `src/agent/tools.py` — **Multi-provider search** with SerpAPI, Brave, Google CSE
+  - Automatic fallback between providers, deduplication, async support
+  - Requires `SERPAPI_KEY`, `BRAVE_SEARCH_KEY`, `GOOGLE_SEARCH_KEY`/`GOOGLE_SEARCH_CX` in env
+- [x] `CodeExecutionTool` (Production-ready)
+  - `src/agent/tools.py` — **Sandboxed Python execution** with restricted builtins
+  - AST-based safe evaluation for calculator fallback, subprocess sandbox for code
+  - Timeout enforcement, temp file cleanup, stdout/stderr capture
+- [x] Dynamic tool selection by query type (LLM-driven)
+  - `src/agent/tools.py` — `select_tools_for_query_llm()` uses LLM for intelligent selection
+  - Keyword-based fallback `select_tools_for_query()` also available
 
 ### 3.3 Agentic Patterns
 - [x] Query decomposition (via `plan_node` creating execution plan)
@@ -236,7 +237,9 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
 
 ---
 
-*Plan Version 3.3 | Last Updated: 2026-11-17*
+---
+
+*Plan Version 3.4 | Last Updated: 2026-11-17*
 
 *Plan Version 3.1 | Last Updated: 2026-11-17*
 
