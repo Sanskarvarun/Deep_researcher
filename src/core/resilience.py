@@ -57,6 +57,22 @@ _TRANSIENT_MARKERS = (
     "503",
     "504",
 )
+# A 429/503 can also mean "your plan is exhausted" rather than "try again in a
+# moment". Those must fail fast: retrying with 0.5s backoff against a daily
+# quota that resets in hours only burns the request budget and delays the
+# fallback chain.
+_PERMANENT_MARKERS = (
+    "quota",
+    "resource_exhausted",
+    "billing",
+    "insufficient_quota",
+    "permission denied",
+    "api key not valid",
+    "invalid api key",
+    "unauthenticated",
+    "not found",
+    "no longer available",
+)
 _TRANSIENT_TYPES = {
     "timeouterror",
     "connecterror",
@@ -73,14 +89,21 @@ _TRANSIENT_TYPES = {
 
 
 def is_transient_error(exc: BaseException) -> bool:
-    """Return True for errors that are worth retrying."""
+    """Return True for errors that are worth retrying.
+
+    Quota/plan/billing and authentication failures are permanent: they will not
+    resolve inside our retry window, so the attempt should fail immediately and
+    let the fallback chain take over.
+    """
     if isinstance(exc, CircuitOpenError):
         return False
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return True
+    message = str(exc).lower()
+    if any(marker in message for marker in _PERMANENT_MARKERS):
+        return False
     if type(exc).__name__.lower() in _TRANSIENT_TYPES:
         return True
-    message = str(exc).lower()
     return any(marker in message for marker in _TRANSIENT_MARKERS)
 
 

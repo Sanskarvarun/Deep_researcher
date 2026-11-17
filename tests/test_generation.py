@@ -187,6 +187,18 @@ class TestRAGPromptBuilder:
         assert "[solo?" not in messages[-1]["content"]
         assert "solo?" in messages[-1]["content"]
 
+    def test_empty_results_forbids_citation_markers(self):
+        """No context means nothing to cite; without this the model invents a
+        marker like [doc-a] and the answer ships with an empty sources list."""
+        builder = RAGPromptBuilder()
+        content = builder.build_messages("solo?", [])[-1]["content"]
+        assert "do NOT include any citation markers" in content
+
+    def test_non_empty_results_do_not_get_the_no_context_notice(self):
+        builder = RAGPromptBuilder()
+        content = builder.build_messages("q?", [_make_result("doc-a", "alpha")])[-1]["content"]
+        assert "No source documents were retrieved" not in content
+
 
 # ---------------------------------------------------------------------------
 # CitationTracker

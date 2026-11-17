@@ -149,3 +149,6 @@ Thumbs.db
 graphify-out/cache/
 graphify-out/.gfy-*.tmp
 *.tmp
+
+# Embedded Qdrant storage (QDRANT_URL=./data/qdrant) - runtime data, holds a lock
+/data/qdrant/

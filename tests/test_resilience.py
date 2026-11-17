@@ -190,6 +190,39 @@ class TestRetryPolicy:
         assert not is_transient_error(ValueError("bad input"))
         assert not is_transient_error(CircuitOpenError("llm:gemini"))
 
+    def test_quota_exhaustion_is_not_retried(self):
+        """A daily-quota 429 resets in hours; retrying with 0.5s backoff only
+        burns budget and delays the fallback."""
+        quota_error = RuntimeError(
+            "429 RESOURCE_EXHAUSTED: Quota exceeded for metric "
+            "generate_content_free_tier_requests, limit: 20 ... "
+            "Please retry in 17h48m"
+        )
+        assert not is_transient_error(quota_error)
+
+        attempts = {"n": 0}
+
+        @retry_policy(max_attempts=3, base_delay=0.0, max_delay=0.0)
+        def over_quota():
+            attempts["n"] += 1
+            raise RuntimeError(str(quota_error))
+
+        with pytest.raises(RuntimeError):
+            over_quota()
+        assert attempts["n"] == 1
+
+    def test_auth_failures_are_not_retried(self):
+        attempts = {"n": 0}
+
+        @retry_policy(max_attempts=3, base_delay=0.0, max_delay=0.0)
+        def unauthorized():
+            attempts["n"] += 1
+            raise RuntimeError("Error code: 401 - Missing Authentication header")
+
+        with pytest.raises(RuntimeError):
+            unauthorized()
+        assert attempts["n"] == 1
+
 
 class TestCallWithResilience:
     def test_breaker_sees_one_failure_after_retries_exhausted(self):

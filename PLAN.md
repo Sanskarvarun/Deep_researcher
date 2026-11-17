@@ -148,11 +148,13 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
   - `src/core/resilience.py` — thread-safe `CircuitBreaker` (closed/open/half-open, injectable clock, abandoned-probe recovery) + `CircuitBreakerRegistry`; `retry_policy()` = exponential backoff with jitter, transient failures only; `call_with_resilience()` retries **inside** the breaker so one outage counts as one failure
   - Wired into LLM calls (`llm:<provider>`), embeddings (`embed:huggingface|local|gemini`), and Qdrant (`qdrant`)
   - Per-request timeout on every provider client (`LLM_TIMEOUT_SECONDS`, SDK `max_retries=0`) so a stalled provider fails instead of hanging forever — without a deadline neither retries nor breakers can fire
+  - Quota/plan/auth errors are classified as permanent, so a daily-quota 429 ("retry in ~18h") fails immediately instead of being retried three times; only genuinely transient failures (timeouts, connection resets, short 429s) retry
   - Degraded tiers get their own breaker (`llm:<provider>:degraded`), so an overloaded large model can't disable its own small-model fallback
   - Unknown routes and wrong methods return the same error envelope (`NOT_FOUND` / `METHOD_NOT_ALLOWED`) as every other failure
 - [x] Graceful degradation (70B → 8B fallback)
   - `invoke_with_fallback()` tries every full-size model first, then each provider's smaller model (`*_DEGRADED_MODEL`), skipping providers whose breaker is open; streaming and async streaming follow the same plan
   - `outcome` dict reports the winning provider/model and whether the degraded tier was used; `generate.degraded` / `generate.circuit_rejected` metrics track how often it happens
+  - Empty retrieval is handled explicitly: the prompt says there is nothing to cite, so answers don't ship with invented markers (e.g. `[doc-a]`) alongside an empty sources list
   - Default Gemini models are the `-latest` aliases (`gemini-flash-latest` → `gemini-flash-lite-latest`) so pinned names can't silently rot; content blocks are normalised in `_content_text()` because Gemini 3.x returns them as dicts (answers were previously wrapped in a Python repr)
 - Tests: `tests/test_resilience.py`, `test_security.py`, `test_rate_limit.py`, `test_api.py`
 

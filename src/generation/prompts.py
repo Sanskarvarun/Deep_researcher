@@ -123,6 +123,15 @@ class RAGPromptBuilder:
         providers (Gemini, OpenAI-compatible, Groq).
         """
         context = self.build_context(results)
+        if not results:
+            # With no retrieved chunks the usual "cite sources as [doc_id]"
+            # instruction invites invented markers. Say explicitly that there is
+            # nothing to cite so answers don't come back with dangling keys.
+            context = (
+                "(No source documents were retrieved for this question. "
+                "Answer only from the user's question, and do NOT include any "
+                "citation markers such as [doc-a] — there are no sources to cite.)"
+            )
         user_content = self.user_template.format(question=question, context=context)
 
         messages: list[dict[str, str]] = [
