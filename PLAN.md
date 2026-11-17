@@ -158,13 +158,30 @@ Build a production-grade RAG (Retrieval-Augmented Generation) agent with agentic
   - Default Gemini models are the `-latest` aliases (`gemini-flash-latest` → `gemini-flash-lite-latest`) so pinned names can't silently rot; content blocks are normalised in `_content_text()` because Gemini 3.x returns them as dicts (answers were previously wrapped in a Python repr)
 - Tests: `tests/test_resilience.py`, `test_security.py`, `test_rate_limit.py`, `test_api.py`
 
-### 2.5 Data Pipeline Robustness
-- [ ] Idempotent ingestion (content hash dedup)
-- [ ] Incremental updates
-- [ ] Dead letter handling for failed docs
-- [ ] Celery background jobs + WebSocket progress
+### 2.5 Data Pipeline Robustness ✅
+- [x] Idempotent ingestion (content hash dedup)
+  - Document-level dedup via SHA-256 content hash stored on every chunk payload
+  - Chunk-level dedup skips re-embedding unchanged chunks
+  - `ingest_file` returns `chunks_skipped=-1` for full-document duplicate
+- [x] Incremental updates
+  - File fingerprinting (size + mtime_ns) via `_get_file_fingerprint()`
+  - `needs_update()` and `incremental_ingest()` methods
+  - Skips re-processing with metadata `"skipped: unchanged"`
+- [x] Dead letter handling for failed docs
+  - `DeadLetterEntry` model with error type, stage, retry count, payload
+  - `DeadLetterQueue` with max size, add/get/retry/remove/clear
+  - Automatic enqueue on ingestion failure; `retry_dead_letter_task` for retry
+- [x] Celery background jobs + WebSocket progress
+  - Celery app in `src/jobs/__init__.py` with Redis broker, signal handlers, queue routing
+  - Tasks: `ingest_file_task`, `ingest_batch_task`, `retry_dead_letter_task`
+  - WebSocket `/ws/ingest/{task_id}` with real-time progress updates
+  - REST endpoints: async ingest (single/batch/incremental), task status/revoke, dead letter retry
+  - `IngestBatchRequest/Response`, `TaskStatusResponse` schemas
+- Tests: `tests/test_pipeline.py` (17 tests), `tests/test_resilience.py`, `tests/test_security.py`, `tests/test_rate_limit.py`, `test_api.py`
 
 ---
+
+*Plan Version 2.5 | Last Updated: 2026-11-17*
 
 ## Phase 3: Agentic Capabilities (Week 5-6)
 
