@@ -12,11 +12,22 @@ from src.generation.citations import Citation
 from src.retrieval.models import SearchResult
 
 
+class SubQuestion(BaseModel):
+    """A decomposed sub-question for multi-hop reasoning."""
+
+    id: str
+    question: str
+    depends_on: list[str] | None = None  # ids of sub-questions that must be answered first
+    status: Literal["pending", "answered", "failed"] = "pending"
+    answer: str | None = None
+    retrieved_docs: list[Any] | None = None
+
+
 class PlanStep(BaseModel):
     """A single step in the execution plan."""
 
     step: int
-    action: str  # "retrieve", "rerank", "generate", "reflect", "tool_use"
+    action: str  # "retrieve", "rerank", "generate", "reflect", "tool_use", "multi_hop"
     description: str
     tool: str | None = None
     args: dict[str, Any] | None = None
@@ -57,6 +68,11 @@ class AgentState(TypedDict):
     final_answer: str | None
     metadata: dict[str, Any]
     error: str | None
+    # Multi-hop reasoning
+    sub_questions: list[SubQuestion]
+    hop: int
+    max_hops: int
+    accumulated_docs: list[Any]
 
 
 def create_initial_state(question: str, messages: list[BaseMessage] | None = None) -> AgentState:
@@ -75,4 +91,8 @@ def create_initial_state(question: str, messages: list[BaseMessage] | None = Non
         final_answer=None,
         metadata={},
         error=None,
+        sub_questions=[],
+        hop=0,
+        max_hops=3,
+        accumulated_docs=[],
     )

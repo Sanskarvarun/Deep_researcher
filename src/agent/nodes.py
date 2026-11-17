@@ -38,65 +38,116 @@ def get_tool_node() -> ToolNode:
 # ---------------------------------------------------------------------------
 
 
+def _decompose_question(question: str) -> list[str]:
+    """Decompose a complex question into sub-questions using an LLM.
+
+    Returns a list of sub-questions (the original question is always first).
+    Falls back to the original question alone when decomposition fails or the
+    question is already atomic.
+    """
+    if len(question) < 40 or not any(
+        marker in question for marker in [" and ", " then ", " after ", ","]
+    ):
+        return [question]
+
+    prompt = f"""Break this question into the smallest set of factually answerable sub-questions.
+
+Question: {question}
+
+Rules:
+- Only decompose when sub-questions have separate answers that must be combined
+- Keep each sub-question self-contained and answerable on its own
+- If the question is already atomic, return it unchanged
+- Output one sub-question per line, no numbering or extra text
+"""
+    try:
+        from src.generation.chain import RAGGenerator
+
+        response = RAGGenerator().generate(prompt, [], temperature=0.0)
+        lines = [ln.strip(" -•\t") for ln in response.answer.split("\n")]
+        candidates = [
+            ln for ln in lines if ln and not ln.lower().startswith(("sub-question", "answer:"))
+        ]
+        subs = candidates[:6]
+        return subs or [question]
+    except Exception as e:
+        log.warning("question_decomposition_failed", error=str(e))
+        return [question]
+
+
+def _synthesize_plan(question: str, sub_questions: list[str]) -> list[PlanStep]:
+    """Build an execution plan from the question and its sub-questions."""
+    plan: list[PlanStep] = []
+
+    for i, sub in enumerate(sub_questions):
+        plan.append(
+            PlanStep(
+                step=i + 1,
+                action="retrieve",
+                description=f"Retrieve evidence for: {sub[:80]}",
+                tool="retrieve",
+                args={"query": sub, "top_k": 5},
+            )
+        )
+
+    plan.append(
+        PlanStep(
+            step=len(plan) + 1,
+            action="rerank",
+            description="Rerank accumulated evidence",
+            tool="rerank",
+            args={"query": question, "top_k": 5},
+        )
+    )
+    plan.append(
+        PlanStep(
+            step=len(plan) + 1,
+            action="generate",
+            description="Generate grounded answer from combined evidence",
+            tool="generate",
+            args={"question": question},
+        )
+    )
+    plan.append(
+        PlanStep(
+            step=len(plan) + 1,
+            action="reflect",
+            description="Reflect on answer quality and evidence coverage",
+            tool="reflect",
+            args={"question": question},
+        )
+    )
+    return plan
+
+
 def plan_node(state: AgentState) -> dict[str, Any]:
-    """Create an execution plan based on the question."""
+    """Create an execution plan: decompose the question, then synthesize steps."""
     question = state["question"]
 
     log.info("node_plan", question=question)
 
-    # Simple heuristic plan based on question analysis
-    plan = []
+    # LLM-driven decomposition into sub-questions, then plan synthesis.
+    sub_questions = _decompose_question(question)
+    log.info("question_decomposed", count=len(sub_questions))
+    plan = _synthesize_plan(question, sub_questions)
 
-    # Always start with retrieval
-    plan.append(
-        PlanStep(
-            step=1,
-            action="retrieve",
-            description="Retrieve relevant documents for the question",
-            tool="retrieve",
-            args={"query": state["question"], "top_k": 5},
-        )
-    )
-
-    # Add rerank if complex query
-    if len(question.split()) > 10 or any(
-        word in question.lower() for word in ["compare", "analyze", "evaluate", "rank"]
-    ):
-        plan.append(
-            PlanStep(
-                step=2,
-                action="rerank",
-                description="Rerank retrieved documents for better relevance",
-                tool="rerank",
-                args={"query": state["question"], "top_k": 5},
-            )
-        )
-
-    # Add generate
-    next_step = len(plan) + 1
-    plan.append(
-        PlanStep(
-            step=next_step,
-            action="generate",
-            description="Generate answer from retrieved context",
-            tool="generate",
-            args={"question": state["question"]},
-        )
-    )
-
-    # Add reflection for complex queries
-    if "?" in question and len(question) > 50:
-        plan.append(
-            PlanStep(
-                step=next_step + 1,
-                action="reflect",
-                description="Reflect on answer quality and completeness",
-                tool="reflect",
-                args={"question": state["question"]},
-            )
-        )
-
-    return {"plan": plan, "current_step": 0}
+    return {
+        "plan": plan,
+        "current_step": 0,
+        "sub_questions": [
+            {"id": f"sq-{i + 1}", "question": sub, "status": "pending"}
+            for i, sub in enumerate(sub_questions)
+        ],
+        "hop": 0,
+        "metadata": {
+            **state.get("metadata", {}),
+            "planning": {
+                "sub_questions": sub_questions,
+                "steps": len(plan),
+                "llm_driven": True,
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +271,48 @@ def reflect_node(state: AgentState) -> dict[str, Any]:
 
     # If reflection suggests improvement, we could loop back
     # For now, just record the reflection
+    reflection_result = result
+
+    # Check if multi-hop reasoning should continue
+    hop = state.get("hop", 0)
+    max_hops = state.get("max_hops", 3)
+    reflection_data = result if isinstance(result, dict) else {}
+    needs_more_info = hop < max_hops - 1 and reflection_data.get("needs_improvement", False)
+
+    if needs_more_info:
+        # Generate follow-up sub-questions based on reflection
+        follow_up_subs = reflection_data.get("suggestions", [])
+        if follow_up_subs:
+            new_subs = [
+                {
+                    "id": f"sq-{len(state.get('sub_questions', [])) + i + 1}",
+                    "question": sub,
+                    "status": "pending",
+                }
+                for i, sub in enumerate(follow_up_subs[:3])
+            ]
+            # Extend the plan with new retrieval steps for follow-ups
+            new_plan_steps = [
+                PlanStep(
+                    step=len(state.get("plan", [])) + i + 1,
+                    action="retrieve",
+                    description=f"Follow-up: {sub['question'][:80]}",
+                    tool="retrieve",
+                    args={"query": sub["question"], "top_k": 5},
+                )
+                for i, sub in enumerate(follow_up_subs[:3])
+            ]
+
+            return {
+                "reflection": reflection_result,
+                "plan": state["plan"] + new_plan_steps,
+                "current_step": state["current_step"] + 1,
+                "sub_questions": state.get("sub_questions", []) + new_subs,
+                "hop": hop + 1,
+            }
+
     return {
-        "reflection": result,
+        "reflection": reflection_result,
         "plan": state["plan"],
         "current_step": state["current_step"] + 1,
     }
@@ -269,6 +360,49 @@ def tool_use_node(state: AgentState) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Multi-Hop Reasoning Node
+# ---------------------------------------------------------------------------
+
+
+def multi_hop_node(state: AgentState) -> dict[str, Any]:
+    """Multi-hop reasoning node - evaluates if more hops are needed.
+
+    This node is called when the plan includes a "multi_hop" action.
+    It evaluates the current state and decides whether to continue with
+    another hop (retrieve more info) or proceed to the next step.
+    """
+    log.info("node_multi_hop", hop=state.get("hop", 0))
+
+    hop = state.get("hop", 0)
+    accumulated_docs = state.get("accumulated_docs", [])
+
+    # If we've reached max hops, proceed to next step
+    if hop >= state.get("max_hops", 3):
+        log.info("multi_hop_max_reached", hop=hop)
+        return {"current_step": state["current_step"] + 1}
+
+    # If we have accumulated docs, add them to the state
+    if state.get("retrieved_docs"):
+        accumulated_docs = state.get("accumulated_docs", []) + state["retrieved_docs"]
+        # Deduplicate by content
+        seen = set()
+        unique_docs = []
+        for doc in accumulated_docs:
+            key = doc.content[:100] if hasattr(doc, "content") else str(doc)[:100]
+            if key not in seen:
+                seen.add(key)
+                unique_docs.append(doc)
+
+        return {
+            "accumulated_docs": unique_docs,
+            "hop": state.get("hop", 0) + 1,
+            "current_step": state["current_step"] + 1,
+        }
+
+    return {"current_step": state["current_step"] + 1}
+
+
+# ---------------------------------------------------------------------------
 # Conditional Routing
 # ---------------------------------------------------------------------------
 
@@ -287,7 +421,7 @@ def should_continue(state: AgentState) -> str:
     # Check if current step is a tool that needs to be executed
     if current_step < len(plan):
         next_action = plan[current_step].action
-        if next_action in ["retrieve", "rerank", "generate", "reflect", "tool_use"]:
+        if next_action in ["retrieve", "rerank", "generate", "reflect", "tool_use", "multi_hop"]:
             return next_action
 
     return END
@@ -392,6 +526,7 @@ def create_agent_graph(checkpointer: Any = None) -> Any:
     workflow.add_node("generate", generate_node)
     workflow.add_node("reflect", reflect_node)
     workflow.add_node("tool_use", tool_use_node)
+    workflow.add_node("multi_hop", multi_hop_node)
     workflow.add_node("human_review", human_review_node)
 
     # Set entry point
@@ -452,6 +587,20 @@ def create_agent_graph(checkpointer: Any = None) -> Any:
         {
             "rerank": "rerank",  # Could re-retrieve based on reflection
             "generate": "generate",  # Could regenerate
+            "tool_use": "tool_use",
+            "multi_hop": "multi_hop",
+            END: END,
+        },
+    )
+
+    workflow.add_conditional_edges(
+        "multi_hop",
+        should_continue,
+        {
+            "retrieve": "retrieve",
+            "rerank": "rerank",
+            "generate": "generate",
+            "reflect": "reflect",
             "tool_use": "tool_use",
             END: END,
         },
